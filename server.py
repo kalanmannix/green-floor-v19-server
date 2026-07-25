@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 20
-PROTOCOL = 20
+BUILD = 21
+PROTOCOL = 21
 MAX_PLAYERS = 16
 WORLD_W = 3200
 WORLD_H = 2200
@@ -51,6 +51,8 @@ PASSIVE_COIN_INTERVAL = 60.0
 PASSIVE_COIN_REWARD = 2
 KO_COIN_REWARD = 12
 MAX_WEAPON_LEVEL = 10
+MAX_ATTRIBUTE_LEVEL = 20
+ADMIN_CODE = os.getenv("ADMIN_CODE", "1279")
 ROOM_ART_MAX = 900000
 DB_PATH = os.getenv("DATABASE_PATH", "green_floor_v17.db")
 
@@ -189,13 +191,24 @@ def sanitize_avatar(v):
     return {'version': 4, 'view': 'side', 'parts': parts, 'layout': v.get('layout')}
 
 
+def sanitize_attributes(value):
+    value = value if isinstance(value, dict) else {}
+    return {
+        key: int(clamp(float(value.get(key) or 0), 0, MAX_ATTRIBUTE_LEVEL))
+        for key in ('health', 'speed', 'reach', 'melee', 'weapon')
+    }
+
+
 def sanitize_progress(v):
     v = v if isinstance(v, dict) else {}
     stats = v.get('missionStats') if isinstance(v.get('missionStats'), dict) else {}
+    skill_points = None if 'skillPoints' not in v else int(clamp(float(v.get('skillPoints') or 0), 0, 1000))
     return {
         'xp': int(clamp(float(v.get('xp') or 0), 0, 250000)),
         'coins': int(clamp(float(v.get('coins') or 35), 0, 250000)),
         'reputation': int(clamp(float(v.get('reputation') or 0), 0, 100000)),
+        'skillPoints': skill_points,
+        'attributes': sanitize_attributes(v.get('attributes')),
         'missionStats': {
             'kos': int(clamp(float(stats.get('kos') or 0), 0, 100000)),
             'minutes': int(clamp(float(stats.get('minutes') or 0), 0, 1000000)),
@@ -285,7 +298,7 @@ def character_payload(player, room=None):
     return {
         'characterId': player.get('characterId'), 'name': player.get('name'),
         'profile': player.get('profileSummary') or {}, 'avatar': avatar,
-        'progress': {k: player.get(k) for k in ('xp','coins','reputation','missionStats','missionClaimed')},
+        'progress': {k: player.get(k) for k in ('xp','coins','reputation','skillPoints','attributes','missionStats','missionClaimed')},
         'inventory': player.get('inventory') or [], 'loadout': player.get('loadout') or {},
         'collections': {}, 'records': player.get('records') or {},
         'roomDecor': [], 'roomArt': player.get('roomArt') or '',
@@ -296,14 +309,33 @@ def save_character(player):
     if player.get('characterId') and player.get('characterSecret'):
         store_character_payload(player['characterId'], player['characterSecret'], character_payload(player))
 
+def apply_attributes(player, preserve_health=True):
+    profile = player.get('profileSummary') or sanitize_profile({})
+    attributes = sanitize_attributes(player.get('attributes'))
+    old_max = float(player.get('maxHealth') or profile['maxHealth'])
+    old_health = float(player.get('health') or old_max)
+    player['attributes'] = attributes
+    player['maxHealth'] = round(profile['maxHealth'] + attributes['health'] * 5)
+    player['speedMult'] = clamp(profile['speedMult'] * (1 + attributes['speed'] * .0125), .75, 1.55)
+    player['sprintMult'] = clamp(profile['sprintMult'] * (1 + attributes['speed'] * .0075), .80, 1.45)
+    player['reachMult'] = clamp(profile['reachMult'] * (1 + attributes['reach'] * .0125), .75, 1.55)
+    player['grabRangeMult'] = clamp(profile['grabRangeMult'] * (1 + attributes['reach'] * .009), .75, 1.55)
+    player['punchDamageMult'] = clamp(profile['punchDamageMult'] * (1 + attributes['melee'] * .035), .70, 2.2)
+    player['weaponDamageMult'] = 1 + attributes['weapon'] * .045
+    player['weaponReachMult'] = 1 + attributes['weapon'] * .018
+    if preserve_health:
+        ratio = clamp(old_health / max(1, old_max), 0, 1)
+        player['health'] = clamp(player['maxHealth'] * ratio, 0, player['maxHealth'])
+    else:
+        player['health'] = player['maxHealth']
+
+
 def apply_profile(player, profile, reset=False):
     profile = sanitize_profile(profile)
-    player.update(profile)
     player['profileSummary'] = profile
-    if reset or 'health' not in player:
-        player['health'] = profile['maxHealth']
-    else:
-        player['health'] = clamp(player['health'], 0, profile['maxHealth'])
+    for key in ('heritage','heightLabel','buildLabel','style','styleDescription','grabPowerMult','attackSpeedMult','sizeScale'):
+        player[key] = profile[key]
+    apply_attributes(player, preserve_health=not reset)
 
 
 def apply_progress(player, raw):
@@ -313,6 +345,16 @@ def apply_progress(player, raw):
     player['level'] = level
     player['levelXp'] = current
     player['levelXpNeeded'] = needed
+    spent = sum(sanitize_attributes(player.get('attributes')).values())
+    if player.get('skillPoints') is None:
+        player['skillPoints'] = max(0, level - 1 - spent)
+    else:
+        player['skillPoints'] = max(0, int(player.get('skillPoints') or 0))
+    earned_points = max(0, level - 1)
+    accounted_points = spent + player['skillPoints']
+    if accounted_points < earned_points:
+        player['skillPoints'] += earned_points - accounted_points
+    apply_attributes(player, preserve_health=True)
 
 
 def make_room(code):
@@ -349,7 +391,8 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'inventory': sanitize_inventory(inventory),
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
-        'lastVoiceAt': 0.0,
+        'lastVoiceAt': 0.0, 'lastBoomAt': 0.0,
+        'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
         'roomArt': sanitize_room_art(room_art), 'roomRef': None,
         'nextPassiveCoinAt': time.monotonic() + PASSIVE_COIN_INTERVAL,
@@ -360,7 +403,7 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
     return player
 
 def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
+    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
     result = {k: v for k, v in player.items() if k not in excluded}
     result['inventoryCount'] = len(player.get('inventory') or [])
     weapon = (player.get('loadout') or {}).get('weapon')
@@ -479,6 +522,8 @@ async def send_progress(player, reason=''):
             'level': player['level'],
             'levelXp': player['levelXp'],
             'levelXpNeeded': player['levelXpNeeded'],
+            'skillPoints': player.get('skillPoints', 0),
+            'attributes': player.get('attributes') or sanitize_attributes({}),
             'missionStats': player['missionStats'],
             'missionClaimed': {},
             'job': None, 'collections': {}, 'records': player.get('records') or {}, 'title': player.get('title','New Student'),
@@ -502,6 +547,9 @@ async def grant(player, xp=0, coins=0, reputation=0, reason=''):
     player['level'] = level
     player['levelXp'] = current
     player['levelXpNeeded'] = needed
+    levels_gained = max(0, player['level'] - old_level)
+    if levels_gained:
+        player['skillPoints'] = int(player.get('skillPoints') or 0) + levels_gained
     player['title'] = 'School Legend' if player['reputation'] >= 500 else 'Crew Captain' if player['reputation'] >= 200 else 'Known Face' if player['reputation'] >= 60 else 'New Student'
     await check_missions(player)
     await send(player['ws'], {
@@ -509,6 +557,7 @@ async def grant(player, xp=0, coins=0, reputation=0, reason=''):
         'xp': int(xp), 'coins': int(coins), 'reputation': int(reputation),
         'reason': reason,
         'level': player['level'], 'levelUp': player['level'] > old_level,
+        'skillPointsGained': levels_gained,
     })
     await send_progress(player, reason)
 
@@ -557,21 +606,25 @@ async def punch(room, attacker):
     attacker['sprinting'] = False
     attacker['stamina'] = max(0, attacker['stamina'] - PUNCH_COST)
     attacker['lastStaminaUseAt'] = now
-    attacker['attackHand'] = 'left' if attacker['attackHand'] == 'right' else 'right'
-    target, distance = nearest(room, attacker, PUNCH_LOCK * (attacker.get('reachMult') or 1))
+    weapon = (attacker.get('loadout') or {}).get('weapon')
+    weapon_level = int(weapon.get('level') or 0) if weapon else 0
+    attacker['attackHand'] = 'right' if weapon else ('left' if attacker['attackHand'] == 'right' else 'right')
+    lock_multiplier = (attacker.get('reachMult') or 1) * ((attacker.get('weaponReachMult') or 1) if weapon else 1)
+    target, distance = nearest(room, attacker, PUNCH_LOCK * lock_multiplier)
     angle = 0 if attacker['facing'] >= 0 else math.pi
     if target:
         angle = math.atan2(target['y'] - attacker['y'], target['x'] - attacker['x'])
         attacker['direction'] = angle
         attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
     attacker['attackAngle'] = angle
-    weapon = (attacker.get('loadout') or {}).get('weapon')
-    weapon_level = int(weapon.get('level') or 0) if weapon else 0
-    hit_range = (PUNCH_RANGE + weapon_level * 5) * (attacker.get('reachMult') or 1)
+    hit_range = (PUNCH_RANGE + weapon_level * 5) * lock_multiplier
     hit = bool(target and distance <= hit_range)
     blocked = False
     knocked_out = False
-    damage = round((PUNCH_DAMAGE + weapon_level * 2) * (attacker.get('punchDamageMult') or 1))
+    if weapon:
+        damage = round((PUNCH_DAMAGE + weapon_level * 2) * (attacker.get('weaponDamageMult') or 1))
+    else:
+        damage = round(PUNCH_DAMAGE * (attacker.get('punchDamageMult') or 1))
     knockback = PUNCH_KB * (.84 + (attacker.get('grabPowerMult') or 1) * .16)
     impact_x = attacker['x'] + math.cos(angle) * 88
     impact_y = attacker['y'] + math.sin(angle) * 88 - 44
@@ -595,7 +648,7 @@ async def punch(room, attacker):
     await broadcast(room, {
         'type': 'combat',
         'event': {
-            'kind': 'punch', 'attackerId': attacker['id'],
+            'kind': 'weapon-swing' if weapon else 'punch', 'attackerId': attacker['id'],
             'targetId': target['id'] if target else None,
             'angle': angle, 'hand': attacker['attackHand'],
             'hit': hit, 'blocked': blocked,
@@ -753,6 +806,118 @@ async def upgrade_weapon(room, player, item_id):
     await send(player['ws'], {'type':'weapon-upgrade','ok':True,'message':f'{weapon["name"]} reached level {weapon["level"]}.','item':weapon})
     save_character(player)
 
+async def spend_skill(room, player, attribute):
+    attribute = str(attribute or '').lower()
+    if attribute not in ('health', 'speed', 'reach', 'melee', 'weapon'):
+        await send(player['ws'], {'type':'skill-result','ok':False,'message':'Unknown attribute.'})
+        return
+    attributes = sanitize_attributes(player.get('attributes'))
+    if int(player.get('skillPoints') or 0) <= 0:
+        await send(player['ws'], {'type':'skill-result','ok':False,'message':'You do not have a skill point.'})
+        return
+    if attributes[attribute] >= MAX_ATTRIBUTE_LEVEL:
+        await send(player['ws'], {'type':'skill-result','ok':False,'message':f'{attribute.title()} is already maxed.'})
+        return
+    player['skillPoints'] = int(player.get('skillPoints') or 0) - 1
+    attributes[attribute] += 1
+    player['attributes'] = attributes
+    apply_attributes(player, preserve_health=True)
+    save_character(player)
+    await send_progress(player, f'Raised {attribute.title()}')
+    await send(player['ws'], {'type':'skill-result','ok':True,'message':f'{attribute.title()} increased to {attributes[attribute]}.'})
+    await snapshot(room)
+
+
+async def authenticate_admin(player, code):
+    ok = secrets.compare_digest(str(code or ''), ADMIN_CODE)
+    player['isAdmin'] = ok
+    await send(player['ws'], {'type':'admin-auth','ok':ok,'message':'Admin unlocked.' if ok else 'Wrong admin code.'})
+
+
+def admin_target(room, target_id):
+    target_id = clean_character_id(target_id)
+    return room['players'].get(target_id)
+
+
+async def admin_action(room, admin, message):
+    if not admin.get('isAdmin'):
+        await send(admin['ws'], {'type':'admin-result','ok':False,'message':'Admin access is locked.'})
+        return
+    action = str(message.get('action') or '')
+    amount = int(clamp(float(message.get('amount') or 0), -99999, 99999))
+    if action == 'announce':
+        text = ''.join(c for c in str(message.get('message') or '') if ord(c) >= 32 and c not in '<>').strip()[:120]
+        if text:
+            await broadcast(room, {'type':'announcement','message':text})
+            await send(admin['ws'], {'type':'admin-result','ok':True,'message':'Announcement sent.'})
+        return
+    target = admin_target(room, message.get('targetId'))
+    if not target:
+        await send(admin['ws'], {'type':'admin-result','ok':False,'message':'Target player is not online.'})
+        return
+    result = 'Action completed.'
+    if action == 'grant-coins':
+        target['coins'] = max(0, min(250000, target['coins'] + amount))
+        result = f'{target["name"]} now has {target["coins"]} coins.'
+        await send_progress(target, 'Admin coins')
+    elif action == 'grant-xp':
+        await grant(target, xp=max(0, amount), reason='Admin XP')
+        result = f'Gave {max(0, amount)} XP to {target["name"]}.'
+    elif action == 'grant-skill':
+        target['skillPoints'] = max(0, min(1000, int(target.get('skillPoints') or 0) + amount))
+        await send_progress(target, 'Admin skill points')
+        result = f'{target["name"]} now has {target["skillPoints"]} skill points.'
+    elif action == 'heal':
+        target['health'] = target['maxHealth']; target['stamina'] = STAMINA_MAX
+        result = f'Healed {target["name"]}.'
+    elif action == 'revive':
+        respawn(target); result = f'Revived {target["name"]}.'
+    elif action == 'ko':
+        target['health'] = 0; target['knockedOut'] = True; target['respawnAt'] = time.monotonic() + KO_TIME
+        target['blocking'] = target['sprinting'] = False; release(room, target)
+        result = f'Knocked out {target["name"]}.'
+    elif action == 'summon':
+        target['space'] = admin.get('space','world'); target['roomOwner'] = admin.get('roomOwner')
+        target['x'], target['y'] = admin['x'] + 70, admin['y']
+        result = f'Summoned {target["name"]}.'
+    elif action == 'teleport':
+        admin['space'] = target.get('space','world'); admin['roomOwner'] = target.get('roomOwner')
+        admin['x'], admin['y'] = target['x'] + 70, target['y']
+        result = f'Teleported to {target["name"]}.'
+    elif action == 'freeze':
+        target['frozen'] = not bool(target.get('frozen'))
+        target['input'] = sanitize_input({}); target['blocking'] = target['sprinting'] = False
+        result = f'{target["name"]} is {"frozen" if target["frozen"] else "unfrozen"}.'
+    elif action == 'max-weapon':
+        weapon = (target.get('loadout') or {}).get('weapon')
+        if not weapon:
+            result = f'{target["name"]} has no equipped weapon.'
+        else:
+            owned = next((item for item in target.get('inventory',[]) if item.get('id') == weapon.get('id')), None)
+            if owned:
+                owned['level'] = MAX_WEAPON_LEVEL
+                target['loadout']['weapon'] = owned
+                room['loadouts'][target['id']] = target['loadout']
+                await broadcast(room, {'type':'loadout','id':target['id'],'loadout':target['loadout']})
+                await send_progress(target, 'Admin max weapon')
+                result = f"Maxed {target['name']}'s weapon."
+    elif action == 'clear-room-art':
+        target['roomArt'] = ''
+        await send(target['ws'], {'type':'room-art-saved','ok':True,'art':''})
+        result = f"Cleared {target['name']}'s room drawing."
+    elif action == 'kick':
+        result = f'Kicked {target["name"]}.'
+        await send(target['ws'], {'type':'kicked','message':'You were removed by an admin.'})
+        try: await target['ws'].close()
+        except Exception: pass
+    else:
+        await send(admin['ws'], {'type':'admin-result','ok':False,'message':'Unknown admin action.'})
+        return
+    save_character(target)
+    await send(admin['ws'], {'type':'admin-result','ok':True,'message':result})
+    await snapshot(room)
+
+
 def simulate(room, dt, now):
     for player in connected(room):
         if now >= player.get('nextPassiveCoinAt', now + PASSIVE_COIN_INTERVAL):
@@ -774,6 +939,8 @@ def simulate(room, dt, now):
                 player['vx'] = player['vy'] = player['moveVx'] = player['moveVy'] = 0
                 player['moving'] = player['blocking'] = player['sprinting'] = False
                 continue
+        if player.get('frozen') or now - float(player.get('lastInputAt') or now) > 1.25:
+            player['input'] = sanitize_input({})
         control = player['input']
         length = math.hypot(control['x'], control['y'])
         x = control['x'] / length if length > 1 else control['x']
@@ -841,13 +1008,15 @@ async def ws_handler(request):
                 room, player = state
                 data = bytes(msg.data)
                 now = time.monotonic()
-                # Voice frame: A, codec version, flags, sequence, timestamp, 320 mu-law bytes.
-                if (len(data) != 329 or data[:2] != b'A\x01' or
-                        now - player['lastVoiceAt'] < VOICE_MIN_INTERVAL):
+                # Audio frames: A = microphone voice, B = secret boombox music.
+                if len(data) != 329 or data[1:2] != b'\x01' or data[:1] not in (b'A', b'B'):
                     continue
-                player['lastVoiceAt'] = now
-                # Server packet: A, codec version, 16-byte speaker id, then flags/sequence/timestamp/payload.
-                packet = b'A\x01' + player['id'].encode('ascii') + data[2:]
+                clock_key = 'lastVoiceAt' if data[:1] == b'A' else 'lastBoomAt'
+                if now - float(player.get(clock_key) or 0) < VOICE_MIN_INTERVAL:
+                    continue
+                player[clock_key] = now
+                # Server packet keeps the frame type and inserts the 16-byte speaker id.
+                packet = data[:2] + player['id'].encode('ascii') + data[2:]
                 targets = connected(room, player.get('space', 'world'))
                 for other in targets:
                     if other['ws'] is ws or other['ws'].closed:
@@ -896,7 +1065,7 @@ async def ws_handler(request):
                 if existing and player is existing:
                     if player.get('remove_task'): player['remove_task'].cancel(); player['remove_task']=None
                 room['players'][character_id] = player; room['sessions'][player['sessionToken']] = character_id
-                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {})
+                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['isAdmin']=False
                 avatar = sanitize_avatar(source.get('avatar') or message.get('avatar'))
                 if avatar: room['avatars'][character_id]=avatar
                 room['loadouts'][character_id]=player.get('loadout') or {}
@@ -911,6 +1080,7 @@ async def ws_handler(request):
             message_type = message.get('type')
             if message_type == 'input':
                 player['input'] = sanitize_input(message)
+                player['lastInputAt'] = time.monotonic()
             elif message_type == 'punch':
                 await punch(room, player)
             elif message_type == 'grab-start':
@@ -933,6 +1103,12 @@ async def ws_handler(request):
                 await save_room_art(room, player, message.get('art'))
             elif message_type == 'upgrade-weapon':
                 await upgrade_weapon(room, player, message.get('itemId'))
+            elif message_type == 'spend-skill':
+                await spend_skill(room, player, message.get('attribute'))
+            elif message_type == 'admin-auth':
+                await authenticate_admin(player, message.get('code'))
+            elif message_type == 'admin-action':
+                await admin_action(room, player, message)
             elif message_type == 'profile':
                 apply_profile(player, message.get('profile'), False)
                 save_character(player)
@@ -993,11 +1169,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v20',
+        'service': 'green-floor-v21',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'png-weapons-room-art',
+        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'held-png-weapons-skills-room-art-admin',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
