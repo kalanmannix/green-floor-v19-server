@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 19
-PROTOCOL = 19
+BUILD = 20
+PROTOCOL = 20
 MAX_PLAYERS = 16
 WORLD_W = 3200
 WORLD_H = 2200
@@ -43,42 +43,16 @@ ROOM_W = 920
 ROOM_H = 650
 ROOM_DOOR = (1600, 2035)
 ROOM_EXIT = (460, 600)
-SCAVENGER_POINTS = [(760,560),(1120,460),(1460,720),(1890,620),(2260,510),(2670,980),(2360,1530),(1770,1720),(1080,1580),(650,1260)]
-COLLECTION_TYPES = ["Manga", "Keychain", "School Badge", "Trading Card", "Music Tape", "Arcade Prize", "Photo"]
-DB_PATH = os.getenv("DATABASE_PATH", "green_floor_v17.db")
-
-TRAINING_DUMMY = (500, 650)
-DELIVERY_START = (2760, 430)
-DELIVERY_END = (440, 1760)
-VENDING = (2550, 1680)
-SHOP = (610, 360)
-MISSION_BOARD = (1600, 250)
-ARCADE = (2780, 1750)
-BASKETBALL = (2520, 620)
+ROOM_DOOR = (1600, 2035)
+ROOM_EXIT = (460, 600)
 CONTROL_CENTER = (1600, 1100)
 CONTROL_RADIUS = 310
-
-SHOP_CATALOG = {
-    "red-headband": {"id": "red-headband", "name": "Red Headband", "slot": "head", "price": 25, "kind": "cosmetic"},
-    "school-bag": {"id": "school-bag", "name": "School Bag", "slot": "back", "price": 40, "kind": "cosmetic"},
-    "lucky-charm": {"id": "lucky-charm", "name": "Lucky Charm", "slot": "hand", "price": 55, "kind": "cosmetic"},
-    "energy-drink": {"id": "energy-drink", "name": "Energy Drink", "slot": "consumable", "price": 10, "kind": "consumable"},
-    "room-poster": {"id": "room-poster", "name": "School Poster", "slot": "room", "price": 35, "kind": "cosmetic"},
-    "room-lamp": {"id": "room-lamp", "name": "Desk Lamp", "slot": "room", "price": 50, "kind": "cosmetic"},
-}
-
-MISSION_DEFS = {
-    "training": {"title": "Training Day", "stat": "training", "goal": 10, "xp": 50, "coins": 25},
-    "pickups": {"title": "Clean the Grounds", "stat": "pickups", "goal": 8, "xp": 45, "coins": 20},
-    "deliveries": {"title": "Courier", "stat": "deliveries", "goal": 2, "xp": 80, "coins": 45},
-    "kos": {"title": "Courtyard Reputation", "stat": "kos", "goal": 3, "xp": 100, "coins": 50},
-}
-
-PICKUP_POINTS = [
-    (360, 360), (850, 300), (1280, 420), (1920, 430), (2360, 340), (2860, 760),
-    (2900, 1350), (2650, 1990), (2150, 1880), (1680, 1980), (1160, 1850), (680, 1980),
-    (330, 1420), (410, 980), (880, 1060), (1260, 850), (2020, 860), (2350, 1200),
-]
+PASSIVE_COIN_INTERVAL = 60.0
+PASSIVE_COIN_REWARD = 2
+KO_COIN_REWARD = 12
+MAX_WEAPON_LEVEL = 10
+ROOM_ART_MAX = 900000
+DB_PATH = os.getenv("DATABASE_PATH", "green_floor_v17.db")
 
 rooms = {}
 
@@ -118,6 +92,19 @@ def store_character_payload(character_id, secret, payload):
     with db_connect() as conn:
         conn.execute("INSERT INTO characters(character_id, secret_hash, data, updated) VALUES(?,?,?,?) ON CONFLICT(character_id) DO UPDATE SET data=excluded.data, updated=excluded.updated", (character_id, secret_hash(secret), encoded, time.time()))
         conn.commit()
+
+
+def load_public_character(character_id):
+    if not character_id:
+        return None
+    with db_connect() as conn:
+        row = conn.execute("SELECT data FROM characters WHERE character_id=?", (character_id,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row['data'])
+    except Exception:
+        return None
 
 
 def clamp(v, a, b):
@@ -205,15 +192,16 @@ def sanitize_avatar(v):
 def sanitize_progress(v):
     v = v if isinstance(v, dict) else {}
     stats = v.get('missionStats') if isinstance(v.get('missionStats'), dict) else {}
-    claimed = v.get('missionClaimed') if isinstance(v.get('missionClaimed'), dict) else {}
     return {
         'xp': int(clamp(float(v.get('xp') or 0), 0, 250000)),
         'coins': int(clamp(float(v.get('coins') or 35), 0, 250000)),
         'reputation': int(clamp(float(v.get('reputation') or 0), 0, 100000)),
-        'missionStats': {key: int(clamp(float(stats.get(key) or 0), 0, 100000)) for key in ('training', 'pickups', 'deliveries', 'kos')},
-        'missionClaimed': {key: claimed.get(key) is True for key in MISSION_DEFS},
+        'missionStats': {
+            'kos': int(clamp(float(stats.get('kos') or 0), 0, 100000)),
+            'minutes': int(clamp(float(stats.get('minutes') or 0), 0, 1000000)),
+        },
+        'missionClaimed': {},
     }
-
 
 def level_for_xp(xp):
     level = 1
@@ -231,27 +219,24 @@ def sanitize_item(item):
     if not isinstance(item, dict):
         return None
     item_id = ''.join(c for c in str(item.get('id') or '') if c.isalnum() or c in '-_')[:48]
-    name = clean_name(item.get('name') or 'Custom Item')[:24]
-    slot = str(item.get('slot') or '')
-    if slot not in ('head', 'back', 'hand', 'room', 'consumable') or not item_id:
+    name = clean_name(item.get('name') or 'Custom Weapon')[:24]
+    if not item_id:
         return None
     image = str(item.get('image') or '')
-    builtin = item.get('builtin') is True
-    if image and (not image.startswith('data:image/png;base64,') or len(image) > 320000):
-        return None
-    if not builtin and not image:
+    if not image.startswith('data:image/png;base64,') or len(image) > 320000:
         return None
     return {
         'id': item_id,
         'name': name,
-        'slot': slot,
+        'slot': 'weapon',
+        'kind': 'weapon',
         'image': image,
-        'builtin': builtin,
+        'builtin': False,
+        'level': int(clamp(float(item.get('level') or 1), 1, MAX_WEAPON_LEVEL)),
         'scale': clamp(float(item.get('scale') or 1), .35, 2.5),
         'offsetX': clamp(float(item.get('offsetX') or 0), -120, 120),
         'offsetY': clamp(float(item.get('offsetY') or 0), -160, 160),
     }
-
 
 def sanitize_inventory(value):
     if not isinstance(value, list):
@@ -269,49 +254,30 @@ def sanitize_inventory(value):
 def sanitize_loadout(value):
     if not isinstance(value, dict):
         return {}
-    result = {}
-    total = 0
-    for slot in ('head', 'back', 'hand'):
-        item = sanitize_item(value.get(slot))
-        if item and item['slot'] == slot:
-            total += len(item.get('image') or '')
-            if total <= 720000:
-                result[slot] = item
-    return result
-
+    item = sanitize_item(value.get('weapon'))
+    return {'weapon': item} if item else {}
 
 def sanitize_collections(value):
-    value = value if isinstance(value, dict) else {}
-    return {name: int(clamp(float(value.get(name) or 0), 0, 999)) for name in COLLECTION_TYPES}
+    return {}
 
 def sanitize_records(value):
     value = value if isinstance(value, dict) else {}
     return {
-        'deliveries': int(clamp(float(value.get('deliveries') or 0), 0, 100000)),
-        'arcadeHigh': int(clamp(float(value.get('arcadeHigh') or 0), 0, 999999)),
-        'basketballMade': int(clamp(float(value.get('basketballMade') or 0), 0, 100000)),
-        'scavengerWins': int(clamp(float(value.get('scavengerWins') or 0), 0, 100000)),
-        'itemsFound': int(clamp(float(value.get('itemsFound') or 0), 0, 100000)),
+        'kos': int(clamp(float(value.get('kos') or 0), 0, 100000)),
+        'minutesOnline': int(clamp(float(value.get('minutesOnline') or 0), 0, 1000000)),
+        'coinsEarned': int(clamp(float(value.get('coinsEarned') or 0), 0, 10000000)),
     }
 
 def sanitize_room_decor(value, inventory=None):
-    if not isinstance(value, list):
-        return []
-    owned = {item.get('id') for item in (inventory or [])}
-    result = []
-    for raw in value[:12]:
-        if not isinstance(raw, dict):
-            continue
-        item = sanitize_item(raw.get('item') or raw)
-        if not item or item['slot'] != 'room' or (owned and item['id'] not in owned):
-            continue
-        result.append({
-            'item': item,
-            'x': clamp(float(raw.get('x') or 160 + len(result) * 90), 70, ROOM_W - 70),
-            'y': clamp(float(raw.get('y') or 170 + (len(result) % 2) * 150), 90, ROOM_H - 80),
-            'scale': clamp(float(raw.get('scale') or item.get('scale') or 1), .35, 2.5),
-        })
-    return result
+    return []
+
+def sanitize_room_art(value):
+    value = str(value or '')
+    if not value:
+        return ''
+    if not value.startswith('data:image/png;base64,') or len(value) > ROOM_ART_MAX:
+        return ''
+    return value
 
 def character_payload(player, room=None):
     room = room or player.get('roomRef')
@@ -321,8 +287,9 @@ def character_payload(player, room=None):
         'profile': player.get('profileSummary') or {}, 'avatar': avatar,
         'progress': {k: player.get(k) for k in ('xp','coins','reputation','missionStats','missionClaimed')},
         'inventory': player.get('inventory') or [], 'loadout': player.get('loadout') or {},
-        'collections': player.get('collections') or {}, 'records': player.get('records') or {},
-        'roomDecor': player.get('roomDecor') or [], 'title': player.get('title') or 'New Student',
+        'collections': {}, 'records': player.get('records') or {},
+        'roomDecor': [], 'roomArt': player.get('roomArt') or '',
+        'title': player.get('title') or 'New Student',
     }
 
 def save_character(player):
@@ -348,13 +315,6 @@ def apply_progress(player, raw):
     player['levelXpNeeded'] = needed
 
 
-def make_pickups():
-    return [
-        {'id': f'p{i+1}', 'x': x, 'y': y, 'active': True, 'respawnAt': 0.0}
-        for i, (x, y) in enumerate(PICKUP_POINTS)
-    ]
-
-
 def make_room(code):
     return {
         'code': code,
@@ -362,16 +322,10 @@ def make_room(code):
         'sessions': {},
         'avatars': {},
         'loadouts': {},
-        'pickups': make_pickups(),
-        'controlOwner': None,
-        'controlSince': 0.0,
-        'controlRewardAt': 0.0,
-        'event': None, 'nextEventAt': time.monotonic() + 45,
         'createdAt': time.time(),
     }
 
-
-def make_player(name, profile, progress, inventory, loadout, session, character_id, character_secret, collections=None, records=None, room_decor=None):
+def make_player(name, profile, progress, inventory, loadout, session, character_id, character_secret, collections=None, records=None, room_decor=None, room_art=None):
     angle = random.random() * math.tau
     distance = 70 + random.random() * 170
     player = {
@@ -386,33 +340,32 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'moving': False, 'sprinting': False, 'blocking': False,
         'stamina': STAMINA_MAX, 'lastStaminaUseAt': 0,
         'score': 0, 'knockedOut': False, 'respawnAt': 0,
-        'lastPunchAt': -10, 'lastTrainingAt': -10,
+        'lastPunchAt': -10,
         'attackHand': 'right', 'attackAngle': 0,
         'impulseX': 0, 'impulseY': 0,
         'grabbedTargetId': None, 'grabbedBy': None,
-        'job': None, 'space': 'world', 'roomOwner': None,
+        'space': 'world', 'roomOwner': None,
         'title': 'New Student',
         'inventory': sanitize_inventory(inventory),
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
         'lastVoiceAt': 0.0,
-        'collections': sanitize_collections(collections),
         'records': sanitize_records(records),
-        'roomDecor': [], 'roomRef': None,
+        'roomArt': sanitize_room_art(room_art), 'roomRef': None,
+        'nextPassiveCoinAt': time.monotonic() + PASSIVE_COIN_INTERVAL,
     }
     apply_profile(player, profile, True)
     apply_progress(player, progress)
     player['loadout'] = sanitize_loadout(loadout)
-    player['roomDecor'] = sanitize_room_decor(room_decor, player['inventory'])
     return player
 
-
 def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomDecor', 'lastVoiceAt', 'characterSecret', 'roomRef'}
+    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
     result = {k: v for k, v in player.items() if k not in excluded}
     result['inventoryCount'] = len(player.get('inventory') or [])
+    weapon = (player.get('loadout') or {}).get('weapon')
+    result['weaponLevel'] = int(weapon.get('level') or 0) if weapon else 0
     return result
-
 
 def connected(room, space=None):
     players = [p for p in room['players'].values() if p['connected']]
@@ -459,29 +412,35 @@ async def snapshot(room):
             'type': 'snapshot',
             'players': {p['id']: public_player(p) for p in same_space},
             'serverTime': int(time.time() * 1000),
-            'controlOwner': room.get('controlOwner'),
             'online': all_online,
             'space': receiver.get('space','world'),
         })
 
-
 async def send_world(room, ws=None):
+    async def room_data(owner_id):
+        owner = room['players'].get(owner_id)
+        if owner:
+            return {'ownerId': owner_id, 'ownerName': owner['name'], 'art': owner.get('roomArt') or ''}
+        stored = load_public_character(owner_id) or {}
+        return {'ownerId': owner_id, 'ownerName': clean_name(stored.get('name') or 'Friend'), 'art': sanitize_room_art(stored.get('roomArt'))}
+
     async def packet_for(player):
         packet = {
-            'type': 'world-state', 'pickups': room['pickups'], 'event': room.get('event'),
-            'zones': {'training': TRAINING_DUMMY, 'deliveryStart': DELIVERY_START, 'deliveryEnd': DELIVERY_END, 'vending': VENDING, 'shop': SHOP, 'missions': MISSION_BOARD, 'arcade': ARCADE, 'basketball': BASKETBALL, 'control': CONTROL_CENTER, 'roomDoor': ROOM_DOOR, 'roomExit': ROOM_EXIT},
-            'catalog': list(SHOP_CATALOG.values()), 'space': player.get('space','world'),
+            'type': 'world-state',
+            'pickups': [], 'event': None, 'zones': {}, 'catalog': [],
+            'space': player.get('space','world'),
         }
         if player.get('space','world').startswith('room:'):
             owner_id = player.get('roomOwner') or player.get('space','world').split(':',1)[1]
-            owner = room['players'].get(owner_id)
-            packet['room'] = {'ownerId': owner_id, 'ownerName': owner['name'] if owner else 'Friend', 'decor': owner.get('roomDecor',[]) if owner else []}
+            packet['room'] = await room_data(owner_id)
         return packet
     if ws:
         player = next((p for p in connected(room) if p['ws'] is ws), None)
-        if player: await send(ws, await packet_for(player))
+        if player:
+            await send(ws, await packet_for(player))
     else:
-        for player in connected(room): await send(player['ws'], await packet_for(player))
+        for player in connected(room):
+            await send(player['ws'], await packet_for(player))
 
 
 def nearest(room, attacker, max_distance):
@@ -521,32 +480,17 @@ async def send_progress(player, reason=''):
             'levelXp': player['levelXp'],
             'levelXpNeeded': player['levelXpNeeded'],
             'missionStats': player['missionStats'],
-            'missionClaimed': player['missionClaimed'],
-            'job': player.get('job'), 'collections': player.get('collections') or {}, 'records': player.get('records') or {}, 'title': player.get('title','New Student'),
+            'missionClaimed': {},
+            'job': None, 'collections': {}, 'records': player.get('records') or {}, 'title': player.get('title','New Student'),
         },
         'inventory': player.get('inventory') or [],
+        'loadout': player.get('loadout') or {},
         'reason': reason,
     })
     save_character(player)
 
-
 async def check_missions(player):
-    completed = []
-    for key, mission in MISSION_DEFS.items():
-        if player['missionClaimed'].get(key):
-            continue
-        if player['missionStats'].get(mission['stat'], 0) >= mission['goal']:
-            player['missionClaimed'][key] = True
-            player['xp'] += mission['xp']
-            player['coins'] += mission['coins']
-            completed.append({'id': key, **mission})
-    if completed:
-        level, current, needed = level_for_xp(player['xp'])
-        player['level'] = level
-        player['levelXp'] = current
-        player['levelXpNeeded'] = needed
-        await send(player['ws'], {'type': 'mission-complete', 'missions': completed})
-
+    return
 
 async def grant(player, xp=0, coins=0, reputation=0, reason=''):
     old_level = player['level']
@@ -578,9 +522,10 @@ def knockout(room, target, attacker):
 
 
 async def reward_knockout(attacker):
-    attacker['missionStats']['kos'] += 1
-    await grant(attacker, xp=18, coins=8, reputation=2, reason='Knockout')
-
+    attacker['missionStats']['kos'] = attacker['missionStats'].get('kos', 0) + 1
+    attacker['records']['kos'] = attacker['records'].get('kos', 0) + 1
+    attacker['records']['coinsEarned'] = attacker['records'].get('coinsEarned', 0) + KO_COIN_REWARD
+    await grant(attacker, xp=22, coins=KO_COIN_REWARD, reputation=3, reason='Knockout')
 
 def respawn(player):
     if player.get('space','world').startswith('room:'):
@@ -601,24 +546,7 @@ def respawn(player):
 
 
 async def training_hit(room, attacker):
-    if attacker.get('space','world') != 'world':
-        return False
-    now = time.monotonic()
-    if now - attacker['lastTrainingAt'] < 0.7:
-        return False
-    if math.hypot(attacker['x'] - TRAINING_DUMMY[0], attacker['y'] - TRAINING_DUMMY[1]) > 185:
-        return False
-    attacker['lastTrainingAt'] = now
-    attacker['missionStats']['training'] += 1
-    await broadcast(room, {
-        'type': 'activity-effect',
-        'kind': 'training-hit',
-        'playerId': attacker['id'],
-        'x': TRAINING_DUMMY[0], 'y': TRAINING_DUMMY[1] - 55,
-    })
-    await grant(attacker, xp=2, coins=1, reason='Training hit')
-    return True
-
+    return False
 
 async def punch(room, attacker):
     now = time.monotonic()
@@ -637,10 +565,13 @@ async def punch(room, attacker):
         attacker['direction'] = angle
         attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
     attacker['attackAngle'] = angle
-    hit = bool(target and distance <= PUNCH_RANGE * (attacker.get('reachMult') or 1))
+    weapon = (attacker.get('loadout') or {}).get('weapon')
+    weapon_level = int(weapon.get('level') or 0) if weapon else 0
+    hit_range = (PUNCH_RANGE + weapon_level * 5) * (attacker.get('reachMult') or 1)
+    hit = bool(target and distance <= hit_range)
     blocked = False
     knocked_out = False
-    damage = round(PUNCH_DAMAGE * (attacker.get('punchDamageMult') or 1))
+    damage = round((PUNCH_DAMAGE + weapon_level * 2) * (attacker.get('punchDamageMult') or 1))
     knockback = PUNCH_KB * (.84 + (attacker.get('grabPowerMult') or 1) * .16)
     impact_x = attacker['x'] + math.cos(angle) * 88
     impact_y = attacker['y'] + math.sin(angle) * 88 - 44
@@ -661,8 +592,6 @@ async def punch(room, attacker):
             knocked_out = True
             knockout(room, target, attacker)
             asyncio.create_task(reward_knockout(attacker))
-    else:
-        await training_hit(room, attacker)
     await broadcast(room, {
         'type': 'combat',
         'event': {
@@ -672,7 +601,7 @@ async def punch(room, attacker):
             'hit': hit, 'blocked': blocked,
             'damage': damage if hit else 0,
             'knockedOut': knocked_out,
-            'x': impact_x, 'y': impact_y,
+            'x': impact_x, 'y': impact_y, 'weaponLevel': weapon_level,
         },
     }, space=attacker.get('space','world'))
 
@@ -716,24 +645,23 @@ async def throw(room, attacker):
     await broadcast(room, {'type': 'combat', 'event': {'kind': 'throw', 'attackerId': attacker['id'], 'targetId': target['id'], 'angle': angle, 'hit': True, 'damage': damage, 'knockedOut': knocked_out, 'x': (attacker['x'] + target['x']) / 2, 'y': (attacker['y'] + target['y']) / 2 - 42}}, space=attacker.get('space','world'))
 
 
-async def add_collection(player, kind=None, reason='Collection found'):
-    kind = kind if kind in COLLECTION_TYPES else random.choice(COLLECTION_TYPES)
-    player['collections'][kind] = player['collections'].get(kind, 0) + 1
-    player['records']['itemsFound'] = player['records'].get('itemsFound', 0) + 1
-    await send(player['ws'], {'type': 'collection-found', 'kind': kind, 'count': player['collections'][kind], 'message': f'Found {kind}'})
-    save_character(player)
+async def add_collection(player, kind=None, reason=''):
+    return
 
 async def enter_personal_room(room, player, owner_id):
+    owner_id = clean_character_id(owner_id)
     owner = room['players'].get(owner_id)
-    if not owner:
-        await send(player['ws'], {'type':'activity-message','message':'That character is not online.'})
+    stored = load_public_character(owner_id) if not owner else None
+    if not owner and not stored:
+        await send(player['ws'], {'type':'activity-message','message':'That room could not be loaded.'})
         return
+    owner_name = owner['name'] if owner else clean_name(stored.get('name') or 'Friend')
     release(room, player)
     player['space'] = f'room:{owner_id}'
     player['roomOwner'] = owner_id
     player['x'], player['y'] = 460, 350
     player['vx'] = player['vy'] = player['moveVx'] = player['moveVy'] = 0
-    await send(player['ws'], {'type':'space-change','space':player['space'],'ownerId':owner_id,'ownerName':owner['name']})
+    await send(player['ws'], {'type':'space-change','space':player['space'],'ownerId':owner_id,'ownerName':owner_name})
     await send_world(room, player['ws'])
     await snapshot(room)
 
@@ -746,207 +674,93 @@ async def leave_personal_room(room, player):
     await send_world(room, player['ws']); await snapshot(room)
 
 async def interact(room, player):
-    if player['knockedOut'] or player.get('grabbedBy'):
-        return
-    now = time.monotonic()
-    if player.get('space','world').startswith('room:'):
-        if math.hypot(player['x']-ROOM_EXIT[0], player['y']-ROOM_EXIT[1]) <= INTERACT_RANGE+30:
-            await leave_personal_room(room, player)
-        else:
-            await send(player['ws'], {'type':'activity-message','message':'Use the door at the bottom to leave the room.'})
-        return
-    event = room.get('event')
-    if event and event.get('kind') == 'scavenger':
-        for item in event.get('items',[]):
-            if item.get('active') and math.hypot(player['x']-item['x'], player['y']-item['y']) <= INTERACT_RANGE:
-                item['active'] = False; item['foundBy'] = player['id']
-                player['records']['scavengerWins'] += 1
-                await add_collection(player, item.get('collection'), 'Scavenger find')
-                await grant(player, xp=18, coins=12, reputation=2, reason='Scavenger find')
-                await send_world(room)
-                return
-    nearest_pickup = None
-    nearest_distance = INTERACT_RANGE
-    for pickup in room['pickups']:
-        if not pickup['active']:
-            continue
-        distance = math.hypot(player['x'] - pickup['x'], player['y'] - pickup['y'])
-        if distance < nearest_distance:
-            nearest_pickup = pickup
-            nearest_distance = distance
-    if nearest_pickup:
-        nearest_pickup['active'] = False
-        nearest_pickup['respawnAt'] = now + 22
-        player['missionStats']['pickups'] += 1
-        if random.random() < .35: await add_collection(player)
-        await grant(player, xp=5, coins=3, reason='Found salvage')
-        await send_world(room)
-        return
-
-    def close(point, distance=INTERACT_RANGE):
-        return math.hypot(player['x'] - point[0], player['y'] - point[1]) <= distance
-
-    if close(ROOM_DOOR):
-        await enter_personal_room(room, player, player['id'])
-        return
-    if close(DELIVERY_START):
-        if player.get('job'):
-            await send(player['ws'], {'type': 'activity-message', 'message': 'You are already carrying a delivery.'})
-        else:
-            player['job'] = {'type': 'delivery', 'target': 'School office'}
-            await send(player['ws'], {'type': 'activity-message', 'message': 'Delivery started. Take the package to the school office.'})
-            await send_progress(player, 'Delivery started')
-        return
-    if close(DELIVERY_END):
-        if player.get('job', {}).get('type') == 'delivery':
-            player['job'] = None
-            player['missionStats']['deliveries'] += 1
-            player['records']['deliveries'] += 1
-            await grant(player, xp=30, coins=25, reputation=3, reason='Delivery completed')
-        else:
-            await send(player['ws'], {'type': 'activity-message', 'message': 'Pick up a package at the convenience store first.'})
-        return
-    if close(VENDING):
-        if player['coins'] < 8:
-            await send(player['ws'], {'type': 'activity-message', 'message': 'You need 8 coins for a drink.'})
-        else:
-            player['coins'] -= 8
-            player['health'] = min(player['maxHealth'], player['health'] + 24)
-            player['stamina'] = STAMINA_MAX
-            await send_progress(player, 'Bought a drink')
-            await send(player['ws'], {'type': 'activity-message', 'message': 'Drink used: health and stamina restored.'})
-        return
-    if close(SHOP):
-        await send(player['ws'], {'type': 'shop-open', 'catalog': list(SHOP_CATALOG.values())})
-        return
-    if close(MISSION_BOARD):
-        await send(player['ws'], {'type': 'missions-open', 'missions': MISSION_DEFS, 'stats': player['missionStats'], 'claimed': player['missionClaimed']})
-        return
-    if close(ARCADE):
-        if player['coins'] < 5:
-            await send(player['ws'], {'type': 'activity-message', 'message': 'The arcade machine costs 5 coins.'})
-        else:
-            player['coins'] -= 5
-            score = random.randint(80, 1000)
-            player['records']['arcadeHigh'] = max(player['records']['arcadeHigh'], score)
-            won = score >= 600
-            if won:
-                await grant(player, xp=12, coins=12, reason='Arcade win')
-            else:
-                await send_progress(player, 'Arcade played')
-                await send(player['ws'], {'type': 'activity-message', 'message': f'Arcade score: {score}.'})
-            save_character(player)
-        return
-    if close(BASKETBALL):
-        scored = random.random() < .55
-        if scored:
-            player['records']['basketballMade'] += 1
-            await grant(player, xp=6, coins=3, reason='Basketball score')
-            await send(player['ws'], {'type': 'activity-message', 'message': 'Basket made.'})
-        else:
-            await send(player['ws'], {'type': 'activity-message', 'message': 'The shot missed.'})
-        await broadcast(room, {'type': 'activity-effect', 'kind': 'basketball', 'playerId': player['id'], 'success': scored, 'x': BASKETBALL[0], 'y': BASKETBALL[1]})
-        return
-    await send(player['ws'], {'type': 'activity-message', 'message': 'Nothing nearby to interact with.'})
-
+    return
 
 async def buy_item(room, player, item_id):
-    item = SHOP_CATALOG.get(str(item_id or ''))
-    if not item:
-        return
-    if item['kind'] == 'consumable':
-        if player['coins'] < item['price']:
-            await send(player['ws'], {'type': 'purchase-result', 'ok': False, 'message': 'Not enough coins.'})
-            return
-        player['coins'] -= item['price']
-        player['health'] = min(player['maxHealth'], player['health'] + 24)
-        player['stamina'] = STAMINA_MAX
-        await send_progress(player, 'Energy drink')
-        await send(player['ws'], {'type': 'purchase-result', 'ok': True, 'message': 'Energy restored.'})
-        return
-    if any(existing['id'] == item['id'] for existing in player['inventory']):
-        await send(player['ws'], {'type': 'purchase-result', 'ok': False, 'message': 'You already own that item.'})
-        return
-    if player['coins'] < item['price']:
-        await send(player['ws'], {'type': 'purchase-result', 'ok': False, 'message': 'Not enough coins.'})
-        return
-    player['coins'] -= item['price']
-    owned = {**item, 'builtin': True, 'image': '', 'scale': 1, 'offsetX': 0, 'offsetY': 0}
-    player['inventory'].append(owned)
-    await send_progress(player, f'Bought {item["name"]}')
-    await send(player['ws'], {'type': 'purchase-result', 'ok': True, 'message': f'Bought {item["name"]}.', 'item': owned})
-    save_character(player)
-
+    await send(player['ws'], {'type':'purchase-result','ok':False,'message':'The shop was removed.'})
 
 async def craft_item(room, player, raw_item):
     item = sanitize_item(raw_item)
-    if not item or item['builtin'] or item['slot'] == 'consumable':
-        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': 'That custom item is invalid.'})
+    if not item:
+        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': 'That PNG weapon is invalid.'})
         return
     if len(player['inventory']) >= 24:
-        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': 'Inventory is full.'})
+        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': 'Weapon inventory is full.'})
         return
     if any(existing['id'] == item['id'] for existing in player['inventory']):
-        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': 'That item already exists.'})
+        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': 'That weapon already exists.'})
         return
     cost = 30
     if player['coins'] < cost:
-        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': f'You need {cost} coins to craft it.'})
+        await send(player['ws'], {'type': 'craft-result', 'ok': False, 'message': f'You need {cost} coins to create it.'})
         return
+    item['level'] = 1
     player['coins'] -= cost
     player['inventory'].append(item)
-    await send_progress(player, f'Crafted {item["name"]}')
-    await send(player['ws'], {'type': 'craft-result', 'ok': True, 'message': f'Crafted {item["name"]}.', 'item': item})
+    await send_progress(player, f'Created {item["name"]}')
+    await send(player['ws'], {'type': 'craft-result', 'ok': True, 'message': f'Created {item["name"]}.', 'item': item})
     save_character(player)
-
 
 async def equip_loadout(room, player, raw_loadout):
     loadout = sanitize_loadout(raw_loadout)
-    owned_ids = {item['id'] for item in player['inventory']}
-    loadout = {slot: item for slot, item in loadout.items() if item['id'] in owned_ids}
+    owned = {item['id']: item for item in player['inventory']}
+    weapon = loadout.get('weapon')
+    if weapon and weapon['id'] in owned:
+        loadout = {'weapon': owned[weapon['id']]}
+    else:
+        loadout = {}
     player['loadout'] = loadout
     room['loadouts'][player['id']] = loadout
     await broadcast(room, {'type': 'loadout', 'id': player['id'], 'loadout': loadout})
     await send(player['ws'], {'type': 'loadout-saved', 'loadout': loadout})
     save_character(player)
 
-
 async def save_room_decor(room, player, raw):
-    player['roomDecor'] = sanitize_room_decor(raw, player.get('inventory') or [])
+    return
+
+async def save_room_art(room, player, raw):
+    art = sanitize_room_art(raw)
+    if raw and not art:
+        await send(player['ws'], {'type':'room-art-saved','ok':False,'message':'Room drawing is too large.'})
+        return
+    player['roomArt'] = art
     save_character(player)
-    await send(player['ws'], {'type':'room-decor-saved','decor':player['roomDecor']})
+    await send(player['ws'], {'type':'room-art-saved','ok':True,'art':art})
     for visitor in connected(room, f"room:{player['id']}"):
         await send_world(room, visitor['ws'])
 
-def start_scavenger(room, now):
-    points = random.sample(SCAVENGER_POINTS, 5)
-    room['event'] = {'kind':'scavenger','title':'Scavenger Hunt','endsAt':time.time()+180,'items':[{'id':f'h{i}','x':x,'y':y,'active':True,'collection':random.choice(COLLECTION_TYPES)} for i,(x,y) in enumerate(points)]}
-    room['nextEventAt'] = now + 360
+async def upgrade_weapon(room, player, item_id):
+    item_id = str(item_id or '')
+    weapon = next((item for item in player.get('inventory', []) if item.get('id') == item_id), None)
+    if not weapon:
+        await send(player['ws'], {'type':'weapon-upgrade','ok':False,'message':'Weapon not found.'})
+        return
+    level = int(weapon.get('level') or 1)
+    if level >= MAX_WEAPON_LEVEL:
+        await send(player['ws'], {'type':'weapon-upgrade','ok':False,'message':'Weapon is already max level.'})
+        return
+    cost = 20 + level * 15
+    if player['coins'] < cost:
+        await send(player['ws'], {'type':'weapon-upgrade','ok':False,'message':f'You need {cost} coins.'})
+        return
+    player['coins'] -= cost
+    weapon['level'] = level + 1
+    if (player.get('loadout') or {}).get('weapon', {}).get('id') == item_id:
+        player['loadout']['weapon'] = weapon
+        room['loadouts'][player['id']] = player['loadout']
+        await broadcast(room, {'type':'loadout','id':player['id'],'loadout':player['loadout']})
+    await send_progress(player, f'Upgraded {weapon["name"]} to level {weapon["level"]}')
+    await send(player['ws'], {'type':'weapon-upgrade','ok':True,'message':f'{weapon["name"]} reached level {weapon["level"]}.','item':weapon})
+    save_character(player)
 
 def simulate(room, dt, now):
-    if room.get('event') and time.time() >= room['event'].get('endsAt',0): room['event'] = None
-    if not room.get('event') and now >= room.get('nextEventAt', now+60): start_scavenger(room, now)
-    for pickup in room['pickups']:
-        if not pickup['active'] and now >= pickup['respawnAt']:
-            pickup['active'] = True
-            pickup['respawnAt'] = 0
-
-    center_players = [p for p in connected(room, 'world') if not p['knockedOut'] and math.hypot(p['x'] - CONTROL_CENTER[0], p['y'] - CONTROL_CENTER[1]) <= CONTROL_RADIUS]
-    if len(center_players) == 1:
-        owner = center_players[0]
-        if room.get('controlOwner') != owner['id']:
-            room['controlOwner'] = owner['id']
-            room['controlSince'] = now
-            room['controlRewardAt'] = now + 10
-        elif now >= room.get('controlRewardAt', now + 10):
-            room['controlRewardAt'] = now + 10
-            asyncio.create_task(grant(owner, xp=8, coins=3, reputation=1, reason='Held the courtyard'))
-    elif room.get('controlOwner') is not None:
-        room['controlOwner'] = None
-        room['controlSince'] = 0
-        room['controlRewardAt'] = 0
-
     for player in connected(room):
+        if now >= player.get('nextPassiveCoinAt', now + PASSIVE_COIN_INTERVAL):
+            player['nextPassiveCoinAt'] = now + PASSIVE_COIN_INTERVAL
+            player['missionStats']['minutes'] = player['missionStats'].get('minutes', 0) + 1
+            player['records']['minutesOnline'] = player['records'].get('minutesOnline', 0) + 1
+            player['records']['coinsEarned'] = player['records'].get('coinsEarned', 0) + PASSIVE_COIN_REWARD
+            asyncio.create_task(grant(player, xp=3, coins=PASSIVE_COIN_REWARD, reason='Time played'))
         if player['knockedOut'] and now >= player['respawnAt']:
             respawn(player)
         if player['grabbedBy']:
@@ -999,7 +813,6 @@ def simulate(room, dt, now):
         player['x'] = clamp(player['x'] + player['vx'] * dt, RADIUS, bound_w - RADIUS)
         player['y'] = clamp(player['y'] + player['vy'] * dt, RADIUS, bound_h - RADIUS)
 
-
 async def remove_later(room, player):
     await asyncio.sleep(RECONNECT_GRACE)
     if player['connected']:
@@ -1008,11 +821,6 @@ async def remove_later(room, player):
     save_character(player)
     room['players'].pop(player['id'], None)
     room['sessions'].pop(player['sessionToken'], None)
-    for visitor in connected(room, f"room:{player['id']}"):
-        visitor['space'] = 'world'; visitor['roomOwner'] = None
-        visitor['x'], visitor['y'] = ROOM_DOOR[0], ROOM_DOOR[1]-100
-        await send(visitor['ws'], {'type':'space-change','space':'world'})
-        await send_world(room, visitor['ws'])
     room['avatars'].pop(player['id'], None)
     room['loadouts'].pop(player['id'], None)
     await broadcast(room, {'type': 'avatar-remove', 'id': player['id']})
@@ -1033,7 +841,7 @@ async def ws_handler(request):
                 room, player = state
                 data = bytes(msg.data)
                 now = time.monotonic()
-                # V18 voice frame: A, codec version, flags, sequence, timestamp, 320 mu-law bytes.
+                # Voice frame: A, codec version, flags, sequence, timestamp, 320 mu-law bytes.
                 if (len(data) != 329 or data[:2] != b'A\x01' or
                         now - player['lastVoiceAt'] < VOICE_MIN_INTERVAL):
                     continue
@@ -1078,8 +886,13 @@ async def ws_handler(request):
                 player = existing if existing and not existing.get('connected') else make_player(
                     source.get('name') or message.get('name'), source.get('profile') or message.get('profile'), source.get('progress') or message.get('progress'),
                     source.get('inventory') or message.get('inventory'), source.get('loadout') or message.get('loadout'), token(message.get('sessionToken')) or secrets.token_urlsafe(24),
-                    character_id, character_secret, source.get('collections') or message.get('collections'), source.get('records') or message.get('records'), source.get('roomDecor') or message.get('roomDecor'))
+                    character_id, character_secret, source.get('collections') or message.get('collections'), source.get('records') or message.get('records'), None, source.get('roomArt') or message.get('roomArt'))
                 player['id'] = character_id; player['characterId'] = character_id; player['characterSecret'] = character_secret; player['roomRef'] = room
+                player.setdefault('roomArt', sanitize_room_art(source.get('roomArt') or message.get('roomArt')))
+                player.setdefault('records', sanitize_records(source.get('records') or message.get('records')))
+                player.setdefault('nextPassiveCoinAt', time.monotonic() + PASSIVE_COIN_INTERVAL)
+                player['inventory'] = sanitize_inventory(player.get('inventory') or source.get('inventory') or message.get('inventory'))
+                player['loadout'] = sanitize_loadout(player.get('loadout') or source.get('loadout') or message.get('loadout'))
                 if existing and player is existing:
                     if player.get('remove_task'): player['remove_task'].cancel(); player['remove_task']=None
                 room['players'][character_id] = player; room['sessions'][player['sessionToken']] = character_id
@@ -1105,7 +918,7 @@ async def ws_handler(request):
             elif message_type == 'throw':
                 await throw(room, player)
             elif message_type == 'interact':
-                await interact(room, player)
+                pass
             elif message_type == 'buy-item':
                 await buy_item(room, player, message.get('itemId'))
             elif message_type == 'craft-item':
@@ -1116,8 +929,10 @@ async def ws_handler(request):
                 await enter_personal_room(room, player, clean_character_id(message.get('characterId')))
             elif message_type == 'leave-room':
                 await leave_personal_room(room, player)
-            elif message_type == 'save-room-decor':
-                await save_room_decor(room, player, message.get('decor'))
+            elif message_type == 'save-room-art':
+                await save_room_art(room, player, message.get('art'))
+            elif message_type == 'upgrade-weapon':
+                await upgrade_weapon(room, player, message.get('itemId'))
             elif message_type == 'profile':
                 apply_profile(player, message.get('profile'), False)
                 save_character(player)
@@ -1178,11 +993,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v19',
+        'service': 'green-floor-v20',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite',
+        'voice': 'mulaw-websocket-relay', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'png-weapons-room-art',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
