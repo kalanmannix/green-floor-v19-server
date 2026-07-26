@@ -1,12 +1,9 @@
-# Green Floor V24 — Render server
-
-Upload these files to the root of the GitHub repository linked to Render.
+# Green Floor V25 — Render server
 
 Render settings:
 
 - Build command: `pip install -r requirements.txt`
 - Start command: `python server.py`
-- Health check path: `/health`
-- Instance type: Free
+- Health check: `/health`
 
-The health endpoint should report `"build": 24` after deployment.
+After deployment, `/health` must report `"build": 25`. V25 adds shared rival NPC simulation, capsules, objectives, rival reputation, fast travel, and server-enforced block leases.
