@@ -10,29 +10,30 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 25
-PROTOCOL = 25
+BUILD = 26
+PROTOCOL = 26
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
+SPAWN_X = 1700
+SPAWN_Y = 930
 RADIUS = 30
 SPEED = 285
 SPRINT = 1.58
-BLOCK_MOVE = 0.44
 STAMINA_MAX = 100
 SPRINT_DRAIN = 29
 STAMINA_REGEN = 24
-PUNCH_COST = 7
-BLOCK_COST = 18
-PUNCH_RANGE = 152
-PUNCH_LOCK = 560
-PUNCH_DAMAGE = 13
-PUNCH_COOLDOWN = 0.405
-PUNCH_KB = 520
-GRAB_RANGE = 132
-GRAB_COST = 11
-THROW_DAMAGE = 14
-THROW_KB = 760
+PUNCH_RANGE = 176
+PUNCH_LOCK = 680
+PARRY_ACTIVE = 0.22
+PARRY_RECOVERY = 0.48
+PARRY_COOLDOWN = 1.50
+PARRY_STUN = 0.72
+DASH_DURATION = 0.76
+DASH_COOLDOWN = 1.70
+DASH_SPEED = 510
+DASH_TURN_RATE = 4.25
+COMBO_RELEASE_PROTECTION = 0.34
 KO_TIME = 3.0
 RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
@@ -41,9 +42,9 @@ VOICE_MIN_INTERVAL = 0.010
 MAIN_WORLD_CODE = "MAIN"
 ROOM_W = 920
 ROOM_H = 650
-ROOM_DOOR = (3600, 4350)
+ROOM_DOOR = (1600, 2035)
 ROOM_EXIT = (460, 600)
-CONTROL_CENTER = (3600, 2400)
+CONTROL_CENTER = (1600, 1100)
 CONTROL_RADIUS = 310
 PASSIVE_COIN_INTERVAL = 60.0
 PASSIVE_COIN_REWARD = 2
@@ -55,55 +56,23 @@ ADMIN_CODE = os.getenv("ADMIN_CODE", "1279")
 ROOM_ART_MAX = 900000
 DB_PATH = os.getenv("DATABASE_PATH", "green_floor_v17.db")
 
-DISTRICTS = {
-    'school': {'label':'School Campus','x1':300,'y1':300,'x2':2500,'y2':2200,'spawn':(1400,1250),'group':'Courtyard Crew'},
-    'shopping': {'label':'Shopping Street','x1':2700,'y1':300,'x2':5000,'y2':1800,'spawn':(3800,1050),'group':'Street Wolves'},
-    'residential': {'label':'Residential Street','x1':5200,'y1':300,'x2':6900,'y2':2300,'spawn':(6050,1300),'group':'Neighborhood Guard'},
-    'riverside': {'label':'Riverside','x1':300,'y1':2500,'x2':3300,'y2':4500,'spawn':(1650,3450),'group':'Riverside Kids'},
-    'industrial': {'label':'Industrial District','x1':3550,'y1':2250,'x2':6900,'y2':4500,'spawn':(5200,3400),'group':'Warehouse Crew'},
+STYLE_DATA = {
+    "Street Brawler": {"delays":[0.00,0.23,0.25,0.29],"damage":[5,5,6,8],"knockback":[120,135,155,310],"kinds":["hook","cross","body","heavy"],"recovery":0.52,"reach":1.00},
+    "Boxer": {"delays":[0.00,0.16,0.17,0.18,0.22],"damage":[4,4,4,5,7],"knockback":[75,85,90,110,235],"kinds":["jab","cross","jab","hook","uppercut"],"recovery":0.36,"reach":0.94},
+    "Kickboxer": {"delays":[0.00,0.22,0.27,0.29],"damage":[5,5,7,8],"knockback":[100,120,175,290],"kinds":["jab","cross","kick","roundhouse"],"recovery":0.50,"reach":1.10},
+    "Karate": {"delays":[0.00,0.25,0.33],"damage":[7,7,10],"knockback":[130,160,345],"kinds":["straight","body","sidekick"],"recovery":0.56,"reach":1.07},
+    "Heavy Weapon": {"delays":[0.00,0.34,0.40],"damage":[8,9,12],"knockback":[165,205,420],"kinds":["weapon-heavy","weapon-heavy","weapon-finisher"],"recovery":0.72,"reach":1.16},
+    "Light Weapon": {"delays":[0.00,0.17,0.18,0.19,0.23],"damage":[4,4,5,5,7],"knockback":[85,95,105,120,260],"kinds":["weapon-light","weapon-light","weapon-light","weapon-light","weapon-finisher"],"recovery":0.38,"reach":1.02},
 }
-
-RIVAL_RANKS = {
-    'Common': {'health':88,'damage':8,'speed':0.92,'reward':(12,10,1),'color':'#d8e4d8'},
-    'Rare': {'health':110,'damage':11,'speed':1.0,'reward':(20,17,2),'color':'#7bbcff'},
-    'Elite': {'health':140,'damage':14,'speed':1.05,'reward':(34,28,4),'color':'#b58aff'},
-    'Legendary': {'health':190,'damage':18,'speed':1.08,'reward':(60,50,8),'color':'#ffd36d'},
-    'Mythic': {'health':260,'damage':23,'speed':1.12,'reward':(110,90,15),'color':'#ff7b96'},
-}
-
-RIVAL_ARCHETYPES = {
-    'Hothead': {'attackRate':0.72,'blockChance':0.06,'preferred':95},
-    'Guard': {'attackRate':1.12,'blockChance':0.48,'preferred':120},
-    'Grappler': {'attackRate':1.0,'blockChance':0.12,'preferred':82},
-    'Weapon User': {'attackRate':0.88,'blockChance':0.18,'preferred':145},
-    'Captain': {'attackRate':0.78,'blockChance':0.28,'preferred':120},
-}
-
-TECHNIQUE_CARDS = {
-    'Iron Guard': 'Blocking costs 18% less stamina.',
-    'Quick Recovery': 'Attack recovery is 8% faster.',
-    'Firm Grip': 'Throws deal 12% more damage.',
-    'Pursuit': 'Gain a short speed boost after a knockout.',
-    'Heavy Finish': 'Every fourth hit deals 18% more damage.',
-    'Second Wind': 'Recover 15 stamina once at low health.',
-    'Calm Breathing': 'Stamina regenerates 12% faster.',
-    'Rival Hunter': 'Rival rewards grant 10% more XP.',
-}
-
-WEAPON_BLUEPRINTS = {
-    'Balanced': {'damage':1.0,'speed':1.0,'reach':1.0},
-    'Heavy': {'damage':1.22,'speed':0.84,'reach':0.98},
-    'Swift': {'damage':0.88,'speed':1.24,'reach':0.94},
-    'Pole': {'damage':0.93,'speed':0.92,'reach':1.28},
-    'Guarded': {'damage':0.92,'speed':0.93,'reach':1.02},
-    'Brutal': {'damage':1.13,'speed':0.92,'reach':1.05},
-    'Technical': {'damage':0.98,'speed':1.08,'reach':1.08},
-}
-
-CAPSULE_RARITY = [('Mythic',1),('Legendary',4),('Elite',12),('Rare',28),('Common',55)]
-DEFAULT_TECHNIQUES = []
-DEFAULT_BLUEPRINTS = ['Balanced']
-
+STYLE_ALIASES = {"Street Fighting":"Street Brawler","Boxing":"Boxer","Muay Thai":"Kickboxer","Wrestling":"Street Brawler","Judo":"Street Brawler"}
+BUILDINGS = [
+    (320,280,1480,480),(420,1130,720,520),(1450,1160,760,480),
+    (3880,260,620,420),(4680,260,620,420),(5480,260,620,420),(6280,260,620,420),
+    (3900,1040,900,520),(5060,1060,720,500),(6010,1040,900,520),
+    (300,3020,520,500),(1020,3020,520,500),(1740,3020,520,500),
+    (420,3860,620,500),(1320,3860,620,500),(2180,3820,430,540),
+    (4620,3000,1050,620),(5860,3000,1040,620),(4720,3970,850,560),(5840,3970,1120,560)
+]
 
 rooms = {}
 
@@ -191,7 +160,7 @@ def sanitize_input(m):
     if length > 1:
         x /= length
         y /= length
-    return {'x': x, 'y': y, 'block': m.get('block') is True, 'sprint': m.get('sprint') is True}
+    return {'x': x, 'y': y, 'sprint': m.get('sprint') is True}
 
 
 def sanitize_profile(v):
@@ -251,57 +220,16 @@ def sanitize_attributes(value):
 def sanitize_progress(v):
     v = v if isinstance(v, dict) else {}
     stats = v.get('missionStats') if isinstance(v.get('missionStats'), dict) else {}
-    objective_stats = v.get('objectiveStats') if isinstance(v.get('objectiveStats'), dict) else {}
-    pity = v.get('capsulePity') if isinstance(v.get('capsulePity'), dict) else {}
-    rival_rep = v.get('rivalRep') if isinstance(v.get('rivalRep'), dict) else {}
-    roster = []
-    for raw in (v.get('rivalRoster') if isinstance(v.get('rivalRoster'), list) else [])[:80]:
-        if not isinstance(raw, dict):
-            continue
-        roster.append({
-            'id': ''.join(c for c in str(raw.get('id') or '') if c.isalnum() or c in '-_')[:40] or secrets.token_hex(5),
-            'name': clean_name(raw.get('name') or 'Transfer Student'),
-            'rank': str(raw.get('rank') or 'Common') if str(raw.get('rank') or 'Common') in RIVAL_RANKS else 'Common',
-            'archetype': str(raw.get('archetype') or 'Hothead') if str(raw.get('archetype') or 'Hothead') in RIVAL_ARCHETYPES else 'Hothead',
-            'group': clean_name(raw.get('group') or 'Courtyard Crew')[:28],
-            'relationship': int(clamp(float(raw.get('relationship') or 0), 0, 100)),
-            'wins': int(clamp(float(raw.get('wins') or 0), 0, 99999)),
-        })
-    techniques = []
-    for name in (v.get('techniques') if isinstance(v.get('techniques'), list) else []):
-        name = str(name)
-        if name in TECHNIQUE_CARDS and name not in techniques:
-            techniques.append(name)
-    equipped = [str(x) for x in (v.get('equippedTechniques') if isinstance(v.get('equippedTechniques'), list) else []) if str(x) in techniques][:3]
-    blueprints = []
-    for name in (v.get('blueprints') if isinstance(v.get('blueprints'), list) else DEFAULT_BLUEPRINTS):
-        name = str(name).title()
-        if name in WEAPON_BLUEPRINTS and name not in blueprints:
-            blueprints.append(name)
-    if 'Balanced' not in blueprints:
-        blueprints.insert(0, 'Balanced')
     skill_points = None if 'skillPoints' not in v else int(clamp(float(v.get('skillPoints') or 0), 0, 1000))
     return {
-        'xp': int(clamp(float(v.get('xp') or 0), 0, 500000)),
-        'coins': int(clamp(float(v.get('coins') or 35), 0, 500000)),
-        'reputation': int(clamp(float(v.get('reputation') or 0), 0, 200000)),
+        'xp': int(clamp(float(v.get('xp') or 0), 0, 250000)),
+        'coins': int(clamp(float(v.get('coins') or 35), 0, 250000)),
+        'reputation': int(clamp(float(v.get('reputation') or 0), 0, 100000)),
         'skillPoints': skill_points,
         'attributes': sanitize_attributes(v.get('attributes')),
         'missionStats': {
             'kos': int(clamp(float(stats.get('kos') or 0), 0, 100000)),
             'minutes': int(clamp(float(stats.get('minutes') or 0), 0, 1000000)),
-        },
-        'objectiveStats': {
-            'rivalKos': int(clamp(float(objective_stats.get('rivalKos') or 0), 0, 1000000)),
-            'bossKos': int(clamp(float(objective_stats.get('bossKos') or 0), 0, 1000000)),
-            'capsules': int(clamp(float(objective_stats.get('capsules') or 0), 0, 1000000)),
-            'dailyRivalKos': int(clamp(float(objective_stats.get('dailyRivalKos') or 0), 0, 1000000)),
-            'dailyMinutes': int(clamp(float(objective_stats.get('dailyMinutes') or 0), 0, 1000000)),
-            'dailyCapsules': int(clamp(float(objective_stats.get('dailyCapsules') or 0), 0, 1000000)),
-            'weeklyRivalKos': int(clamp(float(objective_stats.get('weeklyRivalKos') or 0), 0, 1000000)),
-            'weeklyBossKos': int(clamp(float(objective_stats.get('weeklyBossKos') or 0), 0, 1000000)),
-            'weeklyWeaponHits': int(clamp(float(objective_stats.get('weeklyWeaponHits') or 0), 0, 1000000)),
-            'districts': list(dict.fromkeys(str(x) for x in (objective_stats.get('districts') if isinstance(objective_stats.get('districts'), list) else []) if str(x) in DISTRICTS))[:5],
         },
         'missionClaimed': {},
         'careerClaimed': {str(k): True for k, val in (v.get('careerClaimed') if isinstance(v.get('careerClaimed'), dict) else {}).items() if val},
@@ -311,18 +239,6 @@ def sanitize_progress(v):
         'selectedTitle': (''.join(c for c in str(v.get('selectedTitle') or '') if ord(c) >= 32 and c not in '<>').strip()[:24]),
         'nameplateTheme': str(v.get('nameplateTheme') or 'classic')[:16] if str(v.get('nameplateTheme') or 'classic') in ('classic','pink','blue','red','gold','shadow') else 'classic',
         'accentColor': str(v.get('accentColor') or '#b9f6c8')[:7] if str(v.get('accentColor') or '').startswith('#') else '#b9f6c8',
-        'capsuleTickets': int(clamp(float(v.get('capsuleTickets') if v.get('capsuleTickets') is not None else 6), 0, 9999)),
-        'essence': int(clamp(float(v.get('essence') or 0), 0, 999999)),
-        'capsulePity': {k:int(clamp(float(pity.get(k) or 0),0,9999)) for k in ('rival','technique','blueprint')},
-        'rivalRoster': roster,
-        'techniques': techniques,
-        'equippedTechniques': equipped,
-        'blueprints': blueprints,
-        'rivalRep': {group:int(clamp(float(rival_rep.get(group) or 0),0,99999)) for group in [d['group'] for d in DISTRICTS.values()]},
-        'objectiveDay': str(v.get('objectiveDay') or '')[:16],
-        'objectiveWeek': str(v.get('objectiveWeek') or '')[:16],
-        'dailyObjectivesClaimed': {str(k):True for k,val in (v.get('dailyObjectivesClaimed') if isinstance(v.get('dailyObjectivesClaimed'),dict) else {}).items() if val},
-        'weeklyObjectivesClaimed': {str(k):True for k,val in (v.get('weeklyObjectivesClaimed') if isinstance(v.get('weeklyObjectivesClaimed'),dict) else {}).items() if val},
     }
 
 def level_for_xp(xp):
@@ -359,7 +275,7 @@ def sanitize_item(item):
         'masteryXp': int(clamp(float(item.get('masteryXp') or 0), 0, 99999)),
         'hits': int(clamp(float(item.get('hits') or 0), 0, 999999)),
         'kos': int(clamp(float(item.get('kos') or 0), 0, 999999)),
-        'path': ({'balanced':'Balanced','power':'Heavy','swift':'Swift','reach':'Pole'}.get(str(item.get('path') or '').lower(), str(item.get('path') or 'Balanced').title())) if ({'balanced':'Balanced','power':'Heavy','swift':'Swift','reach':'Pole'}.get(str(item.get('path') or '').lower(), str(item.get('path') or 'Balanced').title())) in WEAPON_BLUEPRINTS else 'Balanced',
+        'path': str(item.get('path') or 'balanced') if str(item.get('path') or 'balanced') in ('balanced','power','swift','reach') else 'balanced',
         'trail': str(item.get('trail') or 'slash') if str(item.get('trail') or 'slash') in ('none','slash','spark','glow') else 'slash',
         'tint': str(item.get('tint') or '#ffffff')[:7] if str(item.get('tint') or '').startswith('#') else '#ffffff',
         'rotation': clamp(float(item.get('rotation') or 0), -180, 180),
@@ -421,7 +337,7 @@ def character_payload(player, room=None):
     return {
         'characterId': player.get('characterId'), 'name': player.get('name'),
         'profile': player.get('profileSummary') or {}, 'avatar': avatar,
-        'progress': {k: player.get(k) for k in ('xp','coins','reputation','skillPoints','attributes','missionStats','objectiveStats','missionClaimed','careerClaimed','dailyClaimDay','loginStreak','bestLoginStreak','selectedTitle','nameplateTheme','accentColor','capsuleTickets','essence','capsulePity','rivalRoster','techniques','equippedTechniques','blueprints','rivalRep','objectiveDay','objectiveWeek','dailyObjectivesClaimed','weeklyObjectivesClaimed')},
+        'progress': {k: player.get(k) for k in ('xp','coins','reputation','skillPoints','attributes','missionStats','missionClaimed','careerClaimed','dailyClaimDay','loginStreak','bestLoginStreak','selectedTitle','nameplateTheme','accentColor')},
         'inventory': player.get('inventory') or [], 'loadout': player.get('loadout') or {},
         'collections': {}, 'records': player.get('records') or {},
         'roomDecor': [], 'roomArt': player.get('roomArt') or '',
@@ -485,282 +401,6 @@ def apply_progress(player, raw):
     apply_attributes(player, preserve_health=True)
 
 
-
-def district_for_point(x, y):
-    for key, zone in DISTRICTS.items():
-        if zone['x1'] <= x <= zone['x2'] and zone['y1'] <= y <= zone['y2']:
-            return key
-    return 'school'
-
-
-def random_point_in_district(district, margin=100):
-    zone = DISTRICTS.get(district, DISTRICTS['school'])
-    return (
-        random.uniform(zone['x1'] + margin, zone['x2'] - margin),
-        random.uniform(zone['y1'] + margin, zone['y2'] - margin),
-    )
-
-
-def make_rival_name(rank, group):
-    first = random.choice(['Akira','Ren','Daichi','Haru','Kaito','Sora','Riku','Yuto','Kenji','Nao','Mika','Rei','Shin','Toma','Jin','Aoi'])
-    tags = {
-        'Common':['',' Rookie',' First-Year'], 'Rare':[' the Quick',' the Wall',' the Loud'],
-        'Elite':[' the Fang',' the Breaker',' the Hawk'], 'Legendary':[' the Captain',' the Unbroken'],
-        'Mythic':[' the School Ghost',' the Last Boss']
-    }
-    return clean_name(first + random.choice(tags.get(rank, [''])))
-
-
-def make_rival(district='school', rank='Common', archetype='Hothead', roster=None):
-    rank = rank if rank in RIVAL_RANKS else 'Common'
-    archetype = archetype if archetype in RIVAL_ARCHETYPES else 'Hothead'
-    zone = DISTRICTS.get(district, DISTRICTS['school'])
-    stats = RIVAL_RANKS[rank]
-    x, y = random_point_in_district(district)
-    rival_id = 'npc-' + secrets.token_hex(6)
-    name = clean_name((roster or {}).get('name') or make_rival_name(rank, zone['group']))
-    max_health = stats['health']
-    return {
-        'id': rival_id, 'name': name, 'isNpc': True, 'npcType':'rival',
-        'district': district, 'group': clean_name((roster or {}).get('group') or zone['group']),
-        'rank': str((roster or {}).get('rank') or rank), 'archetype': str((roster or {}).get('archetype') or archetype),
-        'x':x, 'y':y, 'spawnX':x, 'spawnY':y, 'vx':0.0, 'vy':0.0, 'moveVx':0.0, 'moveVy':0.0,
-        'direction':random.random()*math.tau, 'facing':1, 'moving':False, 'sprinting':False, 'blocking':False,
-        'stamina':STAMINA_MAX, 'maxHealth':max_health, 'health':max_health, 'score':0,
-        'knockedOut':False, 'respawnAt':0.0, 'lastPunchAt':-10.0, 'attackHand':'right', 'attackAngle':0.0,
-        'impulseX':0.0, 'impulseY':0.0, 'grabbedTargetId':None, 'grabbedBy':None,
-        'space':'world', 'title':f"{rank} · {zone['group']}", 'targetId':None,
-        'wanderX':x, 'wanderY':y, 'nextWanderAt':0.0, 'nextDecisionAt':0.0,
-        'blockUntil':0.0, 'attackCooldownUntil':0.0, 'hidden':False,
-        'damage':stats['damage'], 'speedMult':stats['speed'], 'reward':stats['reward'],
-        'sizeScale': 1.0 + {'Common':-.04,'Rare':0,'Elite':.05,'Legendary':.09,'Mythic':.13}[rank],
-        'style':'Rival', 'heritage':'Japanese', 'buildLabel':rank, 'heightLabel':'Average',
-        'reachMult':1.0 + {'Common':0,'Rare':.02,'Elite':.05,'Legendary':.08,'Mythic':.12}[rank],
-        'weaponDamageMult':1.0, 'weaponReachMult':1.0, 'punchDamageMult':1.0,
-        'loadout':{}, 'records':{'blocks':0}, 'staggerUntil':0.0,
-    }
-
-
-def public_npc(npc):
-    keys = ('id','name','isNpc','npcType','district','group','rank','archetype','x','y','vx','vy','direction','facing','moving','sprinting','blocking','stamina','maxHealth','health','score','knockedOut','respawnAt','attackHand','attackAngle','space','title','sizeScale','style','heritage','buildLabel','heightLabel','reachMult','weaponDamageMult','weaponReachMult','punchDamageMult')
-    result = {key:npc.get(key) for key in keys}
-    result['weaponLevel'] = 0
-    result['weaponMasteryRank'] = 0
-    return result
-
-
-def initialize_rivals(room):
-    if room.get('npcs'):
-        return
-    plans = {
-        'school':[('Common','Hothead'),('Common','Guard'),('Rare','Grappler'),('Elite','Captain')],
-        'shopping':[('Common','Hothead'),('Rare','Weapon User'),('Rare','Guard')],
-        'residential':[('Common','Guard'),('Rare','Grappler')],
-        'riverside':[('Rare','Hothead'),('Elite','Grappler'),('Elite','Guard')],
-        'industrial':[('Elite','Weapon User'),('Legendary','Captain'),('Mythic','Captain')],
-    }
-    for district, entries in plans.items():
-        for rank, archetype in entries:
-            rival = make_rival(district, rank, archetype)
-            room['npcs'][rival['id']] = rival
-
-
-def current_day_key():
-    return time.strftime('%Y-%m-%d', time.gmtime())
-
-
-def current_week_key():
-    year, week, _ = time.gmtime().tm_year, int(time.strftime('%W', time.gmtime())), time.gmtime().tm_wday
-    return f'{year}-W{week:02d}'
-
-
-def reset_objective_periods(player):
-    day = current_day_key()
-    week = current_week_key()
-    stats = player.setdefault('objectiveStats', {})
-    if player.get('objectiveDay') != day:
-        player['objectiveDay'] = day
-        player['dailyObjectivesClaimed'] = {}
-        for key in ('dailyRivalKos','dailyMinutes','dailyCapsules'):
-            stats[key] = 0
-    if player.get('objectiveWeek') != week:
-        player['objectiveWeek'] = week
-        player['weeklyObjectivesClaimed'] = {}
-        for key in ('weeklyRivalKos','weeklyBossKos','weeklyWeaponHits'):
-            stats[key] = 0
-
-
-def objective_payload(player):
-    reset_objective_periods(player)
-    stats = player.get('objectiveStats') or {}
-    daily_claimed = player.get('dailyObjectivesClaimed') or {}
-    weekly_claimed = player.get('weeklyObjectivesClaimed') or {}
-    daily = [
-        {'id':'rivals','label':'Defeat 3 rivals','value':int(stats.get('dailyRivalKos') or 0),'target':3,'claimed':bool(daily_claimed.get('rivals')),'reward':'30 coins · 1 ticket'},
-        {'id':'minutes','label':'Play for 10 minutes','value':int(stats.get('dailyMinutes') or 0),'target':10,'claimed':bool(daily_claimed.get('minutes')),'reward':'25 coins · 1 ticket'},
-        {'id':'capsule','label':'Open 1 capsule','value':int(stats.get('dailyCapsules') or 0),'target':1,'claimed':bool(daily_claimed.get('capsule')),'reward':'20 essence'},
-    ]
-    weekly = [
-        {'id':'rivals','label':'Defeat 20 rivals','value':int(stats.get('weeklyRivalKos') or 0),'target':20,'claimed':bool(weekly_claimed.get('rivals')),'reward':'100 coins · 3 tickets'},
-        {'id':'bosses','label':'Defeat 2 boss rivals','value':int(stats.get('weeklyBossKos') or 0),'target':2,'claimed':bool(weekly_claimed.get('bosses')),'reward':'100 coins · 2 tickets'},
-        {'id':'hits','label':'Land 60 weapon hits','value':int(stats.get('weeklyWeaponHits') or 0),'target':60,'claimed':bool(weekly_claimed.get('hits')),'reward':'75 coins · 2 tickets'},
-    ]
-    return {'daily':daily,'weekly':weekly,'day':player.get('objectiveDay'),'week':player.get('objectiveWeek')}
-
-
-async def check_objectives(player):
-    reset_objective_periods(player)
-    stats = player.get('objectiveStats') or {}
-    awarded = []
-    daily = player.setdefault('dailyObjectivesClaimed', {})
-    weekly = player.setdefault('weeklyObjectivesClaimed', {})
-    daily_rules = [('rivals','dailyRivalKos',3,30,1,0),('minutes','dailyMinutes',10,25,1,0),('capsule','dailyCapsules',1,0,0,20)]
-    weekly_rules = [('rivals','weeklyRivalKos',20,100,3,0),('bosses','weeklyBossKos',2,100,2,0),('hits','weeklyWeaponHits',60,75,2,0)]
-    for key, stat, target, coins, tickets, essence in daily_rules:
-        if int(stats.get(stat) or 0) >= target and not daily.get(key):
-            daily[key] = True; player['coins'] += coins; player['capsuleTickets'] += tickets; player['essence'] += essence
-            awarded.append(f'Daily {key}')
-    for key, stat, target, coins, tickets, essence in weekly_rules:
-        if int(stats.get(stat) or 0) >= target and not weekly.get(key):
-            weekly[key] = True; player['coins'] += coins; player['capsuleTickets'] += tickets; player['essence'] += essence
-            awarded.append(f'Weekly {key}')
-    if awarded and player.get('ws'):
-        save_character(player)
-        await send(player['ws'], {'type':'objective-reward','awarded':awarded,'objectives':objective_payload(player)})
-        await send_progress(player, 'Objectives completed')
-
-
-def technique_active(player, name):
-    return name in (player.get('equippedTechniques') or [])
-
-
-def weighted_rarity(pity_count=0):
-    if pity_count >= 49:
-        return 'Legendary'
-    if pity_count >= 9:
-        pool = [('Mythic',1),('Legendary',8),('Elite',26),('Rare',65)]
-    else:
-        pool = CAPSULE_RARITY
-    roll = random.uniform(0, sum(weight for _, weight in pool))
-    total = 0
-    for rarity, weight in pool:
-        total += weight
-        if roll <= total:
-            return rarity
-    return 'Common'
-
-
-def capsule_essence_for(rarity):
-    return {'Common':5,'Rare':12,'Elite':25,'Legendary':60,'Mythic':150}.get(rarity,5)
-
-
-async def open_capsule(room, player, kind):
-    kind = str(kind or '').lower()
-    if kind not in ('rival','technique','blueprint'):
-        await send(player['ws'], {'type':'capsule-result','ok':False,'message':'Unknown capsule.'}); return
-    if int(player.get('capsuleTickets') or 0) < 1:
-        await send(player['ws'], {'type':'capsule-result','ok':False,'message':'You need a capsule ticket.'}); return
-    player['capsuleTickets'] -= 1
-    pity = player.setdefault('capsulePity', {'rival':0,'technique':0,'blueprint':0})
-    rarity = weighted_rarity(int(pity.get(kind) or 0))
-    pity[kind] = 0 if rarity in ('Legendary','Mythic') else int(pity.get(kind) or 0) + 1
-    duplicate = False
-    result = {}
-    if kind == 'rival':
-        district = random.choice(list(DISTRICTS.keys()))
-        group = DISTRICTS[district]['group']
-        archetype = random.choice(list(RIVAL_ARCHETYPES.keys()))
-        rival = {'id':'roster-'+secrets.token_hex(5),'name':make_rival_name(rarity,group),'rank':rarity,'archetype':archetype,'group':group,'relationship':0,'wins':0}
-        roster = player.setdefault('rivalRoster', [])
-        match = next((r for r in roster if r.get('name') == rival['name'] and r.get('rank') == rival['rank']), None)
-        if match:
-            duplicate = True; match['relationship'] = min(100, int(match.get('relationship') or 0) + 12); player['essence'] += capsule_essence_for(rarity)
-            rival = match
-        else:
-            roster.append(rival)
-            room.setdefault('sharedRivals', []).append(rival)
-            spawned = make_rival(district, rarity, archetype, rival)
-            room['npcs'][spawned['id']] = spawned
-        result = rival
-    elif kind == 'technique':
-        names = list(TECHNIQUE_CARDS.keys())
-        # Rarity biases toward later, more unusual cards without making them strictly stronger.
-        index_floor = {'Common':0,'Rare':1,'Elite':2,'Legendary':4,'Mythic':5}[rarity]
-        name = random.choice(names[index_floor:])
-        owned = player.setdefault('techniques', [])
-        if name in owned:
-            duplicate = True; player['essence'] += capsule_essence_for(rarity)
-        else:
-            owned.append(name)
-        result = {'name':name,'description':TECHNIQUE_CARDS[name]}
-    else:
-        names = list(WEAPON_BLUEPRINTS.keys())
-        rarity_map = {'Common':['Balanced','Swift'],'Rare':['Heavy','Swift','Guarded'],'Elite':['Pole','Technical','Brutal'],'Legendary':['Pole','Brutal','Technical'],'Mythic':['Brutal','Technical','Pole']}
-        name = random.choice(rarity_map[rarity])
-        owned = player.setdefault('blueprints', ['Balanced'])
-        if name in owned:
-            duplicate = True; player['essence'] += capsule_essence_for(rarity)
-        else:
-            owned.append(name)
-        result = {'name':name,'stats':WEAPON_BLUEPRINTS[name]}
-    stats = player.setdefault('objectiveStats', {})
-    stats['dailyCapsules'] = int(stats.get('dailyCapsules') or 0) + 1
-    stats['capsules'] = int(stats.get('capsules') or 0) + 1
-    save_character(player)
-    await send(player['ws'], {'type':'capsule-result','ok':True,'kind':kind,'rarity':rarity,'result':result,'duplicate':duplicate,'message':f'{rarity} {kind.title()} capsule opened.'})
-    await send_progress(player, 'Capsule opened')
-    await check_objectives(player)
-    await send_world(room)
-
-
-async def equip_technique(player, name, active=True):
-    name = str(name or '')
-    owned = player.get('techniques') or []
-    equipped = player.setdefault('equippedTechniques', [])
-    if name not in owned:
-        await send(player['ws'], {'type':'technique-result','ok':False,'message':'Technique not unlocked.'}); return
-    if active:
-        if name not in equipped:
-            if len(equipped) >= 3:
-                await send(player['ws'], {'type':'technique-result','ok':False,'message':'Only three techniques can be equipped.'}); return
-            equipped.append(name)
-    else:
-        equipped[:] = [item for item in equipped if item != name]
-    save_character(player)
-    await send(player['ws'], {'type':'technique-result','ok':True,'message':'Technique loadout updated.','equipped':equipped})
-    await send_progress(player, 'Technique loadout')
-
-
-async def set_weapon_blueprint(room, player, item_id, blueprint):
-    blueprint = str(blueprint or '').title()
-    if blueprint not in (player.get('blueprints') or []):
-        await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Blueprint not unlocked.'}); return
-    weapon = next((item for item in player.get('inventory', []) if item.get('id') == item_id), None)
-    if not weapon:
-        await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Weapon not found.'}); return
-    weapon['path'] = blueprint
-    if (player.get('loadout') or {}).get('weapon', {}).get('id') == item_id:
-        player['loadout']['weapon'] = weapon
-    room['loadouts'][player['id']] = player.get('loadout') or {}
-    await broadcast(room, {'type':'loadout','id':player['id'],'loadout':player['loadout']})
-    save_character(player)
-    await send(player['ws'], {'type':'weapon-customized','ok':True,'message':f'{weapon["name"]} now uses the {blueprint} blueprint.','item':weapon})
-
-
-async def fast_travel(room, player, district):
-    if district not in DISTRICTS or player.get('space') != 'world':
-        return
-    release(room, player)
-    x, y = DISTRICTS[district]['spawn']
-    player['x'], player['y'] = x + random.uniform(-50,50), y + random.uniform(-50,50)
-    player['input'] = sanitize_input({}); player['blocking'] = player['sprinting'] = False; player['blockLeaseUntil'] = 0
-    stats = player.setdefault('objectiveStats', {})
-    districts = stats.setdefault('districts', [])
-    if district not in districts:
-        districts.append(district)
-    await send(player['ws'], {'type':'activity-message','message':f'Arrived at {DISTRICTS[district]["label"]}.'})
-    await snapshot(room)
-
 def make_room(code):
     return {
         'code': code,
@@ -768,8 +408,6 @@ def make_room(code):
         'sessions': {},
         'avatars': {},
         'loadouts': {},
-        'npcs': {},
-        'sharedRivals': [],
         'createdAt': time.time(),
     }
 
@@ -781,24 +419,27 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'characterId': character_id or secrets.token_hex(12),
         'characterSecret': character_secret,
         'name': clean_name(name),
-        'x': clamp(DISTRICTS['school']['spawn'][0] + math.cos(angle) * distance, RADIUS, WORLD_W - RADIUS),
-        'y': clamp(DISTRICTS['school']['spawn'][1] + math.sin(angle) * distance, RADIUS, WORLD_H - RADIUS),
+        'x': clamp(SPAWN_X + math.cos(angle) * min(distance, 120), RADIUS, WORLD_W - RADIUS),
+        'y': clamp(SPAWN_Y + math.sin(angle) * min(distance, 120), RADIUS, WORLD_H - RADIUS),
         'vx': 0, 'vy': 0, 'moveVx': 0, 'moveVy': 0,
         'direction': random.random() * math.tau, 'facing': 1,
-        'moving': False, 'sprinting': False, 'blocking': False,
+        'moving': False, 'sprinting': False, 'blocking': False, 'parrying': False,
         'stamina': STAMINA_MAX, 'lastStaminaUseAt': 0,
         'score': 0, 'knockedOut': False, 'respawnAt': 0,
-        'lastPunchAt': -10,
-        'attackHand': 'right', 'attackAngle': 0,
+        'lastPunchAt': -10, 'attackRecoveryUntil': 0,
+        'attackHand': 'right', 'attackAngle': 0, 'attackKind': 'jab',
         'impulseX': 0, 'impulseY': 0,
-        'grabbedTargetId': None, 'grabbedBy': None,
+        'stunnedUntil': 0, 'invulnerableUntil': 0,
+        'parryUntil': 0, 'parryRecoveryUntil': 0, 'parryReadyAt': 0,
+        'dashActive': False, 'dashEndAt': 0, 'dashReadyAt': 0, 'dashAngle': 0, 'dashAttackPending': False,
+        'comboOwner': None, 'comboTarget': None, 'comboStep': -1, 'comboLength': 0, 'comboToken': 0,
         'space': 'world', 'roomOwner': None,
         'title': 'New Student',
         'inventory': sanitize_inventory(inventory),
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
         'lastVoiceAt': 0.0, 'lastBoomAt': 0.0,
-        'lastInputAt': time.monotonic(), 'blockLeaseUntil': 0.0, 'isAdmin': False, 'frozen': False,
+        'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
         'roomArt': sanitize_room_art(room_art), 'roomRef': None,
         'nextPassiveCoinAt': time.monotonic() + PASSIVE_COIN_INTERVAL,
@@ -809,13 +450,65 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
     update_title(player)
     return player
 
+def effective_style(player):
+    raw = str(player.get('style') or (player.get('profile') or {}).get('style') or 'Street Brawler')
+    style = STYLE_ALIASES.get(raw, raw)
+    if style not in STYLE_DATA:
+        style = 'Street Brawler'
+    return style
+
+
+def is_position_blocked(x, y, radius=RADIUS):
+    for bx, by, bw, bh in BUILDINGS:
+        if bx - radius < x < bx + bw + radius and by - radius < y < by + bh + radius:
+            return True
+    return False
+
+
+def move_with_collisions(player, dx, dy, bound_w=WORLD_W, bound_h=WORLD_H):
+    nx = clamp(player['x'] + dx, RADIUS, bound_w - RADIUS)
+    ny = clamp(player['y'] + dy, RADIUS, bound_h - RADIUS)
+    if player.get('space','world').startswith('room:'):
+        player['x'], player['y'] = nx, ny
+        return
+    if not is_position_blocked(nx, player['y']):
+        player['x'] = nx
+    else:
+        player['moveVx'] = 0
+    if not is_position_blocked(player['x'], ny):
+        player['y'] = ny
+    else:
+        player['moveVy'] = 0
+
+
+def cancel_combo(room, attacker, release_target=True):
+    attacker['comboToken'] = int(attacker.get('comboToken') or 0) + 1
+    target_id = attacker.get('comboTarget')
+    attacker['comboTarget'] = None
+    attacker['comboStep'] = -1
+    attacker['comboLength'] = 0
+    if release_target and target_id:
+        target = room['players'].get(target_id)
+        if target and target.get('comboOwner') == attacker['id']:
+            target['comboOwner'] = None
+            target['stunnedUntil'] = min(float(target.get('stunnedUntil') or 0), time.monotonic() + 0.06)
+
+
 def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt', 'blockLeaseUntil'}
+    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
     result = {k: v for k, v in player.items() if k not in excluded}
     result['inventoryCount'] = len(player.get('inventory') or [])
     weapon = (player.get('loadout') or {}).get('weapon')
     result['weaponLevel'] = int(weapon.get('level') or 0) if weapon else 0
     result['weaponMasteryRank'] = int(weapon.get('masteryRank') or 0) if weapon else 0
+    now = time.monotonic()
+    result['parrying'] = now < float(player.get('parryUntil') or 0)
+    result['stunned'] = now < float(player.get('stunnedUntil') or 0)
+    result['comboLocked'] = bool(player.get('comboOwner'))
+    result['parryCooldown'] = max(0.0, float(player.get('parryReadyAt') or 0) - now)
+    result['dashCooldown'] = max(0.0, float(player.get('dashReadyAt') or 0) - now)
+    result['dashActive'] = bool(player.get('dashActive'))
+    result['combatStyle'] = effective_style(player)
     return result
 
 def connected(room, space=None):
@@ -859,12 +552,9 @@ async def snapshot(room):
     ]
     for receiver in connected(room):
         same_space = connected(room, receiver.get('space','world'))
-        entries = {p['id']: public_player(p) for p in same_space}
-        if receiver.get('space','world') == 'world':
-            entries.update({npc_id: public_npc(npc) for npc_id, npc in room.get('npcs', {}).items() if not npc.get('hidden')})
         await send(receiver['ws'], {
             'type': 'snapshot',
-            'players': entries,
+            'players': {p['id']: public_player(p) for p in same_space},
             'serverTime': int(time.time() * 1000),
             'online': all_online,
             'space': receiver.get('space','world'),
@@ -881,10 +571,7 @@ async def send_world(room, ws=None):
     async def packet_for(player):
         packet = {
             'type': 'world-state',
-            'pickups': [], 'event': None, 'zones': DISTRICTS, 'catalog': [],
-            'districts': DISTRICTS,
-            'rivalGroups': {key:{'label':zone['group'],'district':key,'reputation':int((player.get('rivalRep') or {}).get(zone['group']) or 0)} for key,zone in DISTRICTS.items()},
-            'objectives': objective_payload(player),
+            'pickups': [], 'event': None, 'zones': {}, 'catalog': [],
             'space': player.get('space','world'),
         }
         if player.get('space','world').startswith('room:'):
@@ -902,18 +589,16 @@ async def send_world(room, ws=None):
 
 def nearest(room, attacker, max_distance):
     best = None
-    best_distance = max_distance + 1
-    candidates = list(connected(room, attacker.get('space','world')))
-    if attacker.get('space','world') == 'world' and not attacker.get('isNpc'):
-        candidates += [npc for npc in room.get('npcs', {}).values() if not npc.get('knockedOut') and not npc.get('hidden')]
-    for player in candidates:
-        if player['id'] == attacker['id'] or player.get('knockedOut'):
+    best_distance = max_distance
+    for player in connected(room, attacker.get('space','world')):
+        if player['id'] == attacker['id'] or player['knockedOut']:
             continue
         distance = math.hypot(player['x'] - attacker['x'], player['y'] - attacker['y'])
         if distance < best_distance:
             best = player
             best_distance = distance
-    return (best, best_distance) if best and best_distance <= max_distance else (None, best_distance)
+    return best, best_distance
+
 
 def release(room, player):
     if player.get('grabbedTargetId'):
@@ -941,20 +626,6 @@ async def send_progress(player, reason=''):
             'skillPoints': player.get('skillPoints', 0),
             'attributes': player.get('attributes') or sanitize_attributes({}),
             'missionStats': player['missionStats'],
-            'objectiveStats': player.get('objectiveStats') or {},
-            'objectives': objective_payload(player),
-            'capsuleTickets': player.get('capsuleTickets') or 0,
-            'essence': player.get('essence') or 0,
-            'capsulePity': player.get('capsulePity') or {'rival':0,'technique':0,'blueprint':0},
-            'rivalRoster': player.get('rivalRoster') or [],
-            'techniques': player.get('techniques') or [],
-            'equippedTechniques': player.get('equippedTechniques') or [],
-            'blueprints': player.get('blueprints') or ['Balanced'],
-            'rivalRep': player.get('rivalRep') or {},
-            'objectiveDay': player.get('objectiveDay') or '',
-            'objectiveWeek': player.get('objectiveWeek') or '',
-            'dailyObjectivesClaimed': player.get('dailyObjectivesClaimed') or {},
-            'weeklyObjectivesClaimed': player.get('weeklyObjectivesClaimed') or {},
             'missionClaimed': {},
             'careerClaimed': player.get('careerClaimed') or {},
             'dailyClaimDay': player.get('dailyClaimDay') or '',
@@ -1138,12 +809,9 @@ async def grant(player, xp=0, coins=0, reputation=0, reason=''):
     bonus_rep = 0
     if levels_gained:
         player['skillPoints'] = int(player.get('skillPoints') or 0) + levels_gained
-        ticket_bonus = 0
         for gained_level in range(old_level + 1, player['level'] + 1):
             if gained_level % 5 == 0: bonus_coins += 25
             if gained_level % 10 == 0: bonus_rep += 8
-            if gained_level % 3 == 0: ticket_bonus += 1
-        player['capsuleTickets'] = int(player.get('capsuleTickets') or 0) + ticket_bonus
         player['coins'] += bonus_coins
         player['reputation'] += bonus_rep
         player['records']['coinsEarned'] = int(player['records'].get('coinsEarned') or 0) + bonus_coins
@@ -1155,21 +823,23 @@ async def grant(player, xp=0, coins=0, reputation=0, reason=''):
         'xp': int(xp), 'coins': int(coins), 'reputation': int(reputation),
         'reason': reason,
         'level': player['level'], 'levelUp': player['level'] > old_level,
-        'skillPointsGained': levels_gained, 'levelBonusCoins': bonus_coins, 'levelBonusReputation': bonus_rep, 'capsuleTicketsGained': ticket_bonus if levels_gained else 0,
+        'skillPointsGained': levels_gained, 'levelBonusCoins': bonus_coins, 'levelBonusReputation': bonus_rep,
     })
     await send_progress(player, reason)
 
 
 def knockout(room, target, attacker):
     target['knockedOut'] = True
-    target['respawnAt'] = time.monotonic() + (8.0 if target.get('isNpc') else KO_TIME)
-    target['blocking'] = target['sprinting'] = False
-    if not target.get('isNpc'):
-        target_records = target.get('records') or {}
-        target_records['currentKoStreak'] = 0
-        target['records'] = target_records
-        release(room, target)
-    attacker['score'] = int(attacker.get('score') or 0) + 1
+    target['respawnAt'] = time.monotonic() + KO_TIME
+    target['blocking'] = target['sprinting'] = target['parrying'] = False
+    target['dashActive'] = False
+    target['parryUntil'] = 0
+    cancel_combo(room, target)
+    target_records = target.get('records') or {}
+    target_records['currentKoStreak'] = 0
+    target['records'] = target_records
+    release(room, target)
+    attacker['score'] += 1
 
 
 async def reward_knockout(attacker):
@@ -1186,194 +856,303 @@ async def reward_knockout(attacker):
     reason = f'Knockout streak x{streak}' if streak >= 3 else 'Knockout'
     await grant(attacker, xp=22 + min(18, streak * 2), coins=KO_COIN_REWARD + streak_bonus, reputation=3 + streak_rep, reason=reason)
 
-
-async def reward_rival_knockout(room, attacker, rival):
-    rank = str(rival.get('rank') or 'Common')
-    xp, coins, rep = RIVAL_RANKS.get(rank, RIVAL_RANKS['Common'])['reward']
-    if technique_active(attacker, 'Rival Hunter'):
-        xp = round(xp * 1.10)
-    group = str(rival.get('group') or 'Courtyard Crew')
-    rival_rep = attacker.setdefault('rivalRep', {})
-    rival_rep[group] = int(rival_rep.get(group) or 0) + rep
-    stats = attacker.setdefault('objectiveStats', {})
-    stats['rivalKos'] = int(stats.get('rivalKos') or 0) + 1
-    stats['dailyRivalKos'] = int(stats.get('dailyRivalKos') or 0) + 1
-    stats['weeklyRivalKos'] = int(stats.get('weeklyRivalKos') or 0) + 1
-    if rank in ('Legendary','Mythic') or str(rival.get('archetype')) == 'Captain':
-        stats['bossKos'] = int(stats.get('bossKos') or 0) + 1
-        stats['weeklyBossKos'] = int(stats.get('weeklyBossKos') or 0) + 1
-    roster = attacker.get('rivalRoster') or []
-    roster_match = next((r for r in roster if r.get('name') == rival.get('name')), None)
-    if roster_match:
-        roster_match['wins'] = int(roster_match.get('wins') or 0) + 1
-        roster_match['relationship'] = min(100, int(roster_match.get('relationship') or 0) + 2)
-    ticket = 1 if random.random() < ({'Common':.05,'Rare':.09,'Elite':.15,'Legendary':.28,'Mythic':.5}.get(rank,.05)) else 0
-    attacker['capsuleTickets'] = int(attacker.get('capsuleTickets') or 0) + ticket
-    if technique_active(attacker, 'Pursuit'):
-        attacker['pursuitUntil'] = time.monotonic() + 3.0
-    await grant(attacker, xp=xp, coins=coins, reputation=rep, reason=f'{rank} rival defeated')
-    if ticket:
-        await send(attacker['ws'], {'type':'activity-message','message':'The rival dropped a capsule ticket reward.'})
-    await check_objectives(attacker)
-    await send_world(room)
-
-
-def respawn_rival(rival):
-    x, y = random_point_in_district(rival.get('district') or 'school')
-    rival['x'], rival['y'] = x, y
-    rival['spawnX'], rival['spawnY'] = x, y
-    rival['wanderX'], rival['wanderY'] = x, y
-    rival['health'] = rival['maxHealth']
-    rival['stamina'] = STAMINA_MAX
-    rival['knockedOut'] = False
-    rival['respawnAt'] = 0
-    rival['blocking'] = rival['sprinting'] = rival['moving'] = False
-    rival['targetId'] = None
-    rival['impulseX'] = rival['impulseY'] = 0
-
 def respawn(player):
     if player.get('space','world').startswith('room:'):
         player['x'], player['y'] = 460, 350
     else:
         angle = random.random() * math.tau
         distance = 90 + random.random() * 190
-        player['x'] = clamp(DISTRICTS['school']['spawn'][0] + math.cos(angle) * distance, RADIUS, WORLD_W - RADIUS)
-        player['y'] = clamp(DISTRICTS['school']['spawn'][1] + math.sin(angle) * distance, RADIUS, WORLD_H - RADIUS)
+        player['x'] = clamp(SPAWN_X + math.cos(angle) * min(distance, 120), RADIUS, WORLD_W - RADIUS)
+        player['y'] = clamp(SPAWN_Y + math.sin(angle) * min(distance, 120), RADIUS, WORLD_H - RADIUS)
     for key in ['vx', 'vy', 'moveVx', 'moveVy', 'impulseX', 'impulseY']:
         player[key] = 0
     player['health'] = player['maxHealth']
     player['stamina'] = STAMINA_MAX
     player['knockedOut'] = False
     player['respawnAt'] = 0
-    player['blocking'] = player['sprinting'] = False
-    player['grabbedTargetId'] = player['grabbedBy'] = None
+    player['blocking'] = player['sprinting'] = player['parrying'] = False
+    player['dashActive'] = False
+    player['dashAttackPending'] = False
+    player['stunnedUntil'] = 0
+    player['invulnerableUntil'] = time.monotonic() + 0.7
+    player['parryUntil'] = player['parryRecoveryUntil'] = 0
+    player['comboOwner'] = player['comboTarget'] = None
+    player['comboStep'] = -1
+    player['comboLength'] = 0
+    player['comboToken'] = int(player.get('comboToken') or 0) + 1
 
 
 async def training_hit(room, attacker):
     return False
 
-async def punch(room, attacker):
+def angle_difference(a, b):
+    return (a - b + math.pi) % math.tau - math.pi
+
+
+def nearest_combat_target(room, attacker, max_distance):
+    best = None
+    best_distance = max_distance
     now = time.monotonic()
-    weapon = (attacker.get('loadout') or {}).get('weapon')
-    weapon_level = int(weapon.get('level') or 0) if weapon else 0
-    weapon_mastery = int(weapon.get('masteryRank') or 1) if weapon else 0
-    weapon_path = str(weapon.get('path') or 'Balanced').title() if weapon else 'Balanced'
-    blueprint = WEAPON_BLUEPRINTS.get(weapon_path, WEAPON_BLUEPRINTS['Balanced'])
-    path_damage = blueprint['damage']
-    path_speed = blueprint['speed']
-    path_reach = blueprint['reach']
-    mastery_speed = (1 + max(0, weapon_mastery - 1) * .012) * path_speed if weapon else 1
-    tech_speed = 1.08 if technique_active(attacker, 'Quick Recovery') else 1.0
-    cooldown = PUNCH_COOLDOWN / ((attacker.get('attackSpeedMult') or 1) * mastery_speed * tech_speed)
-    if attacker['knockedOut'] or attacker['blocking'] or attacker['grabbedBy'] or attacker['grabbedTargetId'] or attacker['stamina'] < PUNCH_COST or now - attacker['lastPunchAt'] < cooldown:
+    for target in connected(room, attacker.get('space','world')):
+        if target['id'] == attacker['id'] or target.get('knockedOut'):
+            continue
+        if target.get('comboOwner') and target.get('comboOwner') != attacker['id']:
+            continue
+        if now < float(target.get('invulnerableUntil') or 0):
+            continue
+        distance = math.hypot(target['x'] - attacker['x'], target['y'] - attacker['y'])
+        if distance < best_distance:
+            best = target
+            best_distance = distance
+    return best, best_distance
+
+
+def parry_faces_attacker(defender, attacker):
+    toward_attacker = math.atan2(attacker['y'] - defender['y'], attacker['x'] - defender['x'])
+    facing_angle = float(defender.get('direction') or (0 if defender.get('facing', 1) >= 0 else math.pi))
+    return abs(angle_difference(toward_attacker, facing_angle)) <= 1.45
+
+
+async def parry(room, player):
+    now = time.monotonic()
+    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or player.get('comboOwner') or player.get('comboTarget') or player.get('dashActive'):
         return
-    attacker['lastPunchAt'] = now
-    attacker['sprinting'] = False
-    attacker['stamina'] = max(0, attacker['stamina'] - PUNCH_COST)
-    attacker['lastStaminaUseAt'] = now
-    attacker['attackHand'] = 'right' if weapon else ('left' if attacker['attackHand'] == 'right' else 'right')
-    lock_multiplier = (attacker.get('reachMult') or 1) * ((attacker.get('weaponReachMult') or 1) if weapon else 1)
-    target, distance = nearest(room, attacker, PUNCH_LOCK * lock_multiplier)
-    angle = 0 if attacker['facing'] >= 0 else math.pi
+    if now < float(player.get('parryReadyAt') or 0):
+        return
+    player['sprinting'] = False
+    player['parrying'] = True
+    player['parryUntil'] = now + PARRY_ACTIVE
+    player['parryRecoveryUntil'] = now + PARRY_ACTIVE + PARRY_RECOVERY
+    player['parryReadyAt'] = now + PARRY_COOLDOWN
+    player['moveVx'] *= 0.25
+    player['moveVy'] *= 0.25
+    await broadcast(room, {'type':'combat','event':{
+        'kind':'parry-start','attackerId':player['id'],'targetId':None,'angle':player.get('direction',0),
+        'hit':False,'parried':False,'durationMs':round(PARRY_ACTIVE*1000),'x':player['x'],'y':player['y']-50
+    }}, space=player.get('space','world'))
+
+
+async def dash(room, player, raw_x=0, raw_y=0):
+    now = time.monotonic()
+    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or now < float(player.get('parryRecoveryUntil') or 0) or player.get('comboOwner') or player.get('comboTarget'):
+        return
+    if player.get('dashActive') or now < float(player.get('dashReadyAt') or 0):
+        return
+    x = clamp(float(raw_x or 0), -1, 1)
+    y = clamp(float(raw_y or 0), -1, 1)
+    length = math.hypot(x, y)
+    if length > .08:
+        angle = math.atan2(y, x)
+    else:
+        angle = float(player.get('direction') or (0 if player.get('facing',1) >= 0 else math.pi))
+    player['dashActive'] = True
+    player['dashEndAt'] = now + DASH_DURATION
+    player['dashReadyAt'] = now + DASH_DURATION + DASH_COOLDOWN
+    player['dashAngle'] = angle
+    player['dashAttackPending'] = True
+    player['sprinting'] = False
+    player['parrying'] = False
+    player['parryUntil'] = 0
+    player['direction'] = angle
+    player['facing'] = 1 if math.cos(angle) >= 0 else -1
+    player['moveVx'] = player['moveVy'] = 0
+    await broadcast(room, {'type':'combat','event':{
+        'kind':'dash-start','attackerId':player['id'],'targetId':None,'angle':angle,'hit':False,
+        'durationMs':round(DASH_DURATION*1000),'x':player['x'],'y':player['y']-42
+    }}, space=player.get('space','world'))
+
+
+async def resolve_parry(room, attacker, defender, angle):
+    now = time.monotonic()
+    defender['parrying'] = False
+    defender['parryUntil'] = 0
+    defender['parryRecoveryUntil'] = now + 0.11
+    defender['parryReadyAt'] = min(float(defender.get('parryReadyAt') or now), now + 0.42)
+    attacker['stunnedUntil'] = max(float(attacker.get('stunnedUntil') or 0), now + PARRY_STUN)
+    attacker['dashActive'] = False
+    attacker['dashAttackPending'] = False
+    attacker['moveVx'] = attacker['moveVy'] = 0
+    attacker['impulseX'] -= math.cos(angle) * 260
+    attacker['impulseY'] -= math.sin(angle) * 260
+    cancel_combo(room, attacker)
+    await broadcast(room, {'type':'combat','event':{
+        'kind':'parry','attackerId':attacker['id'],'targetId':defender['id'],'angle':angle,
+        'hit':True,'parried':True,'damage':0,'durationMs':round(PARRY_STUN*1000),
+        'x':(attacker['x']+defender['x'])/2,'y':(attacker['y']+defender['y'])/2-48
+    }}, space=attacker.get('space','world'))
+
+
+async def start_attack(room, attacker, dash_attack=False):
+    now = time.monotonic()
+    if attacker.get('knockedOut') or now < float(attacker.get('stunnedUntil') or 0) or now < float(attacker.get('parryRecoveryUntil') or 0):
+        return
+    if attacker.get('comboOwner') or attacker.get('comboTarget'):
+        return
+    if attacker.get('dashActive') and not dash_attack:
+        return
+    if not dash_attack and now < float(attacker.get('attackRecoveryUntil') or 0):
+        return
+
+    style_name = effective_style(attacker)
+    style = STYLE_DATA[style_name]
+    weapon = (attacker.get('loadout') or {}).get('weapon')
+    reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
+    if weapon:
+        reach_mult *= float(attacker.get('weaponReachMult') or 1)
+    lock_distance = (280 if dash_attack else PUNCH_LOCK) * reach_mult
+    target, distance = nearest_combat_target(room, attacker, lock_distance)
+    angle = float(attacker.get('dashAngle') if dash_attack else attacker.get('direction') or 0)
     if target:
         angle = math.atan2(target['y'] - attacker['y'], target['x'] - attacker['x'])
+    attacker['attackAngle'] = angle
+    attacker['direction'] = angle
+    attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
+    attacker['sprinting'] = False
+    attacker['parrying'] = False
+    attacker['parryUntil'] = 0
+    attacker['dashActive'] = False
+    attacker['dashAttackPending'] = False
+    attacker['lastPunchAt'] = now
+
+    opening_reach = (PUNCH_RANGE + (24 if dash_attack else 0)) * reach_mult
+    if not target or distance > opening_reach:
+        attacker['attackRecoveryUntil'] = now + (0.58 if dash_attack else 0.34)
+        await broadcast(room, {'type':'combat','event':{
+            'kind':'dash-whiff' if dash_attack else 'attack-whiff','attackerId':attacker['id'],
+            'targetId':target['id'] if target else None,'angle':angle,'hand':attacker.get('attackHand','right'),
+            'attackKind':'dash' if dash_attack else style['kinds'][0],'comboStep':0,'comboLength':len(style['kinds']),
+            'hit':False,'durationMs':420 if dash_attack else 300,'style':style_name,
+            'x':attacker['x']+math.cos(angle)*92,'y':attacker['y']+math.sin(angle)*92-46
+        }}, space=attacker.get('space','world'))
+        return
+
+    if time.monotonic() < float(target.get('parryUntil') or 0) and parry_faces_attacker(target, attacker):
+        await resolve_parry(room, attacker, target, angle)
+        return
+
+    token_value = int(attacker.get('comboToken') or 0) + 1
+    attacker['comboToken'] = token_value
+    attacker['comboTarget'] = target['id']
+    attacker['comboStep'] = 0
+    attacker['comboLength'] = len(style['kinds'])
+    target['comboOwner'] = attacker['id']
+    target['stunnedUntil'] = now + 0.45
+    asyncio.create_task(run_combo(room, attacker['id'], target['id'], token_value, style_name, dash_attack))
+
+
+async def run_combo(room, attacker_id, target_id, token_value, style_name, dash_attack=False):
+    style = STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler'])
+    delays = style['delays']
+    weapon_gain_awarded = False
+    for step, kind in enumerate(style['kinds']):
+        if step > 0:
+            await asyncio.sleep(delays[step])
+        attacker = room['players'].get(attacker_id)
+        target = room['players'].get(target_id)
+        now = time.monotonic()
+        if not attacker or not target or not attacker.get('connected') or not target.get('connected'):
+            if attacker: cancel_combo(room, attacker)
+            return
+        if int(attacker.get('comboToken') or 0) != token_value or attacker.get('comboTarget') != target_id or target.get('comboOwner') != attacker_id:
+            cancel_combo(room, attacker)
+            return
+        if attacker.get('knockedOut') or target.get('knockedOut') or now < float(attacker.get('stunnedUntil') or 0):
+            cancel_combo(room, attacker)
+            return
+        if attacker.get('space','world') != target.get('space','world'):
+            cancel_combo(room, attacker)
+            return
+
+        angle = math.atan2(target['y'] - attacker['y'], target['x'] - attacker['x'])
+        distance = math.hypot(target['x'] - attacker['x'], target['y'] - attacker['y'])
+        weapon = (attacker.get('loadout') or {}).get('weapon')
+        reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
+        if weapon:
+            reach_mult *= float(attacker.get('weaponReachMult') or 1)
+        max_step_distance = (PUNCH_RANGE + 74) * reach_mult
+        if distance > max_step_distance:
+            cancel_combo(room, attacker)
+            attacker['attackRecoveryUntil'] = now + 0.28
+            return
+
+        # A third player can interrupt the attacker; the locked victim cannot be handed off.
+        if target.get('comboTarget'):
+            cancel_combo(room, target)
+
+        attacker['attackAngle'] = angle
         attacker['direction'] = angle
         attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
-    attacker['attackAngle'] = angle
-    mastery_reach = 1 + max(0, weapon_mastery - 1) * .008
-    hit_range = (PUNCH_RANGE + weapon_level * 5) * lock_multiplier * mastery_reach * path_reach
-    hit = bool(target and distance <= hit_range)
-    blocked = False
-    knocked_out = False
-    if weapon:
-        mastery_damage = 1 + max(0, weapon_mastery - 1) * .02
-        damage = round((PUNCH_DAMAGE + weapon_level * 2) * (attacker.get('weaponDamageMult') or 1) * mastery_damage * path_damage)
-        attacker['hitCounter'] = int(attacker.get('hitCounter') or 0) + 1
-        if technique_active(attacker, 'Heavy Finish') and attacker['hitCounter'] % 4 == 0: damage = round(damage * 1.18)
-    else:
-        damage = round(PUNCH_DAMAGE * (attacker.get('punchDamageMult') or 1))
-    knockback = PUNCH_KB * (.84 + (attacker.get('grabPowerMult') or 1) * .16)
-    impact_x = attacker['x'] + math.cos(angle) * 88
-    impact_y = attacker['y'] + math.sin(angle) * 88 - 44
-    if hit:
-        if target['blocking'] and target['stamina'] > 0:
-            blocked = True
-            guard_cost = BLOCK_COST * (.82 if technique_active(target, 'Iron Guard') else 1.0) if not target.get('isNpc') else BLOCK_COST
-            target['stamina'] = max(0, target['stamina'] - guard_cost)
-            if not target.get('isNpc'):
-                target['records']['blocks'] = int(target['records'].get('blocks') or 0) + 1
-            damage = max(1, round(damage * .2))
-            knockback *= .25
-            if target['stamina'] <= 0:
-                target['blocking'] = False
-        target['health'] = max(0, target['health'] - damage)
+        attacker['attackHand'] = 'left' if step % 2 else 'right'
+        attacker['attackKind'] = kind
+        attacker['comboStep'] = step
+
+        base_damage = style['damage'][step]
+        if weapon:
+            level = int(weapon.get('level') or 1)
+            mastery = int(weapon.get('masteryRank') or 1)
+            progression_mult = min(1.72, 1 + max(0, level-1)*0.017 + max(0, mastery-1)*0.022)
+            damage_mult = float(attacker.get('weaponDamageMult') or 1) * progression_mult
+        else:
+            damage_mult = float(attacker.get('punchDamageMult') or 1)
+        if dash_attack and step == 0:
+            damage_mult *= 1.08
+        damage = max(1, round(base_damage * damage_mult))
+        target['health'] = max(0, float(target.get('health') or 0) - damage)
+
+        final = step == len(style['kinds']) - 1
+        knockback = style['knockback'][step] * (1.12 if dash_attack and step == 0 else 1)
         target['impulseX'] += math.cos(angle) * knockback
         target['impulseY'] += math.sin(angle) * knockback
-        impact_x = (attacker['x'] + target['x']) / 2
-        impact_y = (attacker['y'] + target['y']) / 2 - 48
-        if target['health'] <= 0:
-            knocked_out = True
+        attacker['impulseX'] += math.cos(angle) * min(155, knockback * .42)
+        attacker['impulseY'] += math.sin(angle) * min(155, knockback * .42)
+        move_with_collisions(attacker, math.cos(angle) * (24 if not final else 34), math.sin(angle) * (24 if not final else 34))
+        move_with_collisions(target, math.cos(angle) * (18 if not final else 42), math.sin(angle) * (18 if not final else 42))
+
+        next_gap = delays[step+1] if step + 1 < len(delays) else float(style['recovery'])
+        target['stunnedUntil'] = now + next_gap + (0.16 if not final else 0.28)
+        target['moving'] = target['sprinting'] = False
+        target['moveVx'] = target['moveVy'] = 0
+        target['parrying'] = False
+        target['parryUntil'] = 0
+
+        knocked_out = target['health'] <= 0
+        if knocked_out:
             knockout(room, target, attacker)
-            if target.get('isNpc'):
-                asyncio.create_task(reward_rival_knockout(room, attacker, target))
-            else:
-                asyncio.create_task(reward_knockout(attacker))
-        if weapon:
-            objective_stats = attacker.setdefault('objectiveStats', {})
-            objective_stats['weeklyWeaponHits'] = int(objective_stats.get('weeklyWeaponHits') or 0) + 1
-            asyncio.create_task(award_weapon_mastery(room, attacker, 12 if knocked_out else (4 if blocked else 6), knockout=knocked_out))
-            asyncio.create_task(check_objectives(attacker))
-    await broadcast(room, {
-        'type': 'combat',
-        'event': {
-            'kind': 'weapon-swing' if weapon else 'punch', 'attackerId': attacker['id'],
-            'targetId': target['id'] if target else None,
-            'angle': angle, 'hand': attacker['attackHand'],
-            'hit': hit, 'blocked': blocked,
-            'damage': damage if hit else 0,
-            'knockedOut': knocked_out,
-            'x': impact_x, 'y': impact_y, 'weaponLevel': weapon_level,
-        },
-    }, space=attacker.get('space','world'))
+            asyncio.create_task(reward_knockout(attacker))
 
+        await broadcast(room, {'type':'combat','event':{
+            'kind':'combo-hit','attackerId':attacker_id,'targetId':target_id,'angle':angle,
+            'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
+            'hit':True,'damage':damage,'knockedOut':knocked_out,'finisher':final,'dashAttack':dash_attack and step == 0,
+            'durationMs':round(max(.18, next_gap) * 1000),'style':style_name,
+            'x':(attacker['x']+target['x'])/2,'y':(attacker['y']+target['y'])/2-48
+        }}, space=attacker.get('space','world'))
 
-async def grab(room, attacker):
-    if attacker['knockedOut'] or attacker['blocking'] or attacker['grabbedBy'] or attacker['grabbedTargetId'] or attacker['stamina'] < GRAB_COST:
-        return
-    target, _ = nearest(room, attacker, GRAB_RANGE * (attacker.get('grabRangeMult') or 1))
-    if not target or target.get('isNpc') or target['grabbedBy']:
-        return
-    angle = math.atan2(target['y'] - attacker['y'], target['x'] - attacker['x'])
-    attacker['attackAngle'] = attacker['direction'] = angle
-    attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
-    attacker['stamina'] -= GRAB_COST
-    attacker['grabbedTargetId'] = target['id']
-    target['grabbedBy'] = attacker['id']
-    target['blocking'] = target['sprinting'] = False
-    await broadcast(room, {'type': 'combat', 'event': {'kind': 'grab', 'attackerId': attacker['id'], 'targetId': target['id'], 'angle': angle, 'hit': True, 'x': (attacker['x'] + target['x']) / 2, 'y': (attacker['y'] + target['y']) / 2 - 42}}, space=attacker.get('space','world'))
+        if weapon and not weapon_gain_awarded:
+            weapon_gain_awarded = True
+            asyncio.create_task(award_weapon_mastery(room, attacker, 12 if knocked_out else 7, knockout=knocked_out))
 
+        if knocked_out:
+            cancel_combo(room, attacker, release_target=False)
+            target['comboOwner'] = None
+            return
 
-async def throw(room, attacker):
-    target_id = attacker.get('grabbedTargetId')
-    attacker['grabbedTargetId'] = None
-    if not target_id:
-        return
+    attacker = room['players'].get(attacker_id)
     target = room['players'].get(target_id)
-    if not target:
-        return
-    target['grabbedBy'] = None
-    angle = attacker.get('attackAngle') or attacker.get('direction') or 0
-    power = attacker.get('grabPowerMult') or 1
-    damage = round(THROW_DAMAGE * power * (1.12 if technique_active(attacker, 'Firm Grip') else 1.0))
-    target['impulseX'] += math.cos(angle) * THROW_KB * power
-    target['impulseY'] += math.sin(angle) * THROW_KB * power
-    target['health'] = max(0, target['health'] - damage)
-    knocked_out = False
-    if target['health'] <= 0:
-        knocked_out = True
-        knockout(room, target, attacker)
-        asyncio.create_task(reward_knockout(attacker))
-    await broadcast(room, {'type': 'combat', 'event': {'kind': 'throw', 'attackerId': attacker['id'], 'targetId': target['id'], 'angle': angle, 'hit': True, 'damage': damage, 'knockedOut': knocked_out, 'x': (attacker['x'] + target['x']) / 2, 'y': (attacker['y'] + target['y']) / 2 - 42}}, space=attacker.get('space','world'))
+    now = time.monotonic()
+    if attacker and int(attacker.get('comboToken') or 0) == token_value:
+        attacker['comboTarget'] = None
+        attacker['comboStep'] = -1
+        attacker['comboLength'] = 0
+        attacker['attackRecoveryUntil'] = now + float(style['recovery'])
+    if target and target.get('comboOwner') == attacker_id:
+        target['comboOwner'] = None
+        target['stunnedUntil'] = now + 0.16
+        target['invulnerableUntil'] = now + COMBO_RELEASE_PROTECTION
+
+
+async def punch(room, attacker):
+    await start_attack(room, attacker, False)
 
 
 async def add_collection(player, kind=None, reason=''):
@@ -1486,18 +1265,15 @@ async def upgrade_weapon(room, player, item_id):
     save_character(player)
 
 async def set_weapon_path(room, player, item_id, path):
-    legacy = {'balanced':'Balanced','power':'Heavy','swift':'Swift','reach':'Pole'}
-    path = legacy.get(str(path or '').lower(), str(path or '').title())
-    if path not in WEAPON_BLUEPRINTS:
-        await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Unknown blueprint.'}); return
-    if path not in (player.get('blueprints') or ['Balanced']):
-        await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Unlock this blueprint from capsules first.'}); return
+    path = str(path or '')
+    if path not in ('balanced','power','swift','reach'):
+        await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Unknown weapon path.'}); return
     weapon = next((item for item in player.get('inventory', []) if item.get('id') == item_id), None)
     if not weapon:
         await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Weapon not found.'}); return
-    if int(weapon.get('level') or 1) < 5 and path != 'Balanced':
+    if int(weapon.get('level') or 1) < 5:
         await send(player['ws'], {'type':'weapon-customized','ok':False,'message':'Reach weapon level 5 first.'}); return
-    changing = str(weapon.get('path') or 'Balanced') != 'Balanced' and str(weapon.get('path') or 'Balanced') != path
+    changing = str(weapon.get('path') or 'balanced') != 'balanced' and str(weapon.get('path') or 'balanced') != path
     cost = 45 if changing else 0
     if player['coins'] < cost:
         await send(player['ws'], {'type':'weapon-customized','ok':False,'message':f'You need {cost} coins.'}); return
@@ -1507,8 +1283,8 @@ async def set_weapon_path(room, player, item_id, path):
         player['loadout']['weapon'] = weapon
     room['loadouts'][player['id']] = player.get('loadout') or {}
     await broadcast(room, {'type':'loadout','id':player['id'],'loadout':player['loadout']})
-    await send_progress(player, 'Weapon blueprint changed')
-    await send(player['ws'], {'type':'weapon-customized','ok':True,'message':f'{weapon["name"]} now uses the {path} blueprint.','item':weapon})
+    await send_progress(player, 'Weapon path changed')
+    await send(player['ws'], {'type':'weapon-customized','ok':True,'message':f'{weapon["name"]} now uses the {path.title()} path.','item':weapon})
     save_character(player)
 
 
@@ -1698,131 +1474,6 @@ async def admin_action(room, admin, message):
     await snapshot(room)
 
 
-
-async def npc_attack(room, npc, target):
-    now = time.monotonic()
-    if npc.get('knockedOut') or target.get('knockedOut') or target.get('space') != 'world':
-        return
-    archetype = RIVAL_ARCHETYPES.get(npc.get('archetype'), RIVAL_ARCHETYPES['Hothead'])
-    if now < float(npc.get('attackCooldownUntil') or 0):
-        return
-    distance = math.hypot(target['x'] - npc['x'], target['y'] - npc['y'])
-    hit_range = 145 * float(npc.get('reachMult') or 1)
-    if distance > hit_range:
-        return
-    angle = math.atan2(target['y'] - npc['y'], target['x'] - npc['x'])
-    npc['attackAngle'] = npc['direction'] = angle
-    npc['facing'] = 1 if math.cos(angle) >= 0 else -1
-    npc['attackHand'] = 'left' if npc.get('attackHand') == 'right' else 'right'
-    npc['lastPunchAt'] = now
-    npc['attackCooldownUntil'] = now + archetype['attackRate'] + random.uniform(.08,.22)
-    damage = int(npc.get('damage') or 8)
-    blocked = False
-    if target.get('blocking') and target.get('stamina',0) > 0:
-        blocked = True
-        cost = BLOCK_COST * (.82 if technique_active(target, 'Iron Guard') else 1.0)
-        target['stamina'] = max(0, target['stamina'] - cost)
-        damage = max(1, round(damage * .18))
-        target['records']['blocks'] = int(target['records'].get('blocks') or 0) + 1
-        if target['stamina'] <= 0:
-            target['blocking'] = False
-    target['health'] = max(0, target['health'] - damage)
-    kb = 340 if blocked else 470
-    target['impulseX'] += math.cos(angle) * kb
-    target['impulseY'] += math.sin(angle) * kb
-    knocked_out = False
-    if target['health'] <= 0:
-        knocked_out = True
-        knockout(room, target, npc)
-    await broadcast(room, {'type':'combat','event':{
-        'kind':'rival-strike','attackerId':npc['id'],'targetId':target['id'],'angle':angle,'hand':npc['attackHand'],
-        'hit':True,'blocked':blocked,'damage':damage,'knockedOut':knocked_out,
-        'x':(npc['x']+target['x'])/2,'y':(npc['y']+target['y'])/2-46,'rank':npc.get('rank'),'archetype':npc.get('archetype')
-    }}, space='world')
-
-
-def simulate_npcs(room, dt, now):
-    players = connected(room, 'world')
-    if not players:
-        for npc in room.get('npcs', {}).values():
-            npc['moving'] = False; npc['vx'] = npc['vy'] = 0
-        return
-    for npc in room.get('npcs', {}).values():
-        if npc.get('hidden'):
-            continue
-        if npc.get('knockedOut'):
-            if now >= float(npc.get('respawnAt') or 0):
-                respawn_rival(npc)
-            else:
-                npc['moving'] = False; npc['vx'] = npc['vy'] = 0
-            continue
-        district = npc.get('district') or 'school'
-        zone = DISTRICTS.get(district, DISTRICTS['school'])
-        target = None
-        best = 999999
-        for player in players:
-            distance = math.hypot(player['x']-npc['x'], player['y']-npc['y'])
-            if distance < best:
-                best = distance; target = player
-        if best > 720:
-            target = None
-        archetype = RIVAL_ARCHETYPES.get(npc.get('archetype'), RIVAL_ARCHETYPES['Hothead'])
-        if now >= float(npc.get('nextDecisionAt') or 0):
-            npc['nextDecisionAt'] = now + random.uniform(.35,.75)
-            if target and best < 220 and random.random() < archetype['blockChance']:
-                npc['blockUntil'] = now + random.uniform(.35,.85)
-            if now >= float(npc.get('nextWanderAt') or 0):
-                npc['wanderX'], npc['wanderY'] = random_point_in_district(district, 150)
-                npc['nextWanderAt'] = now + random.uniform(3.5,7.5)
-        npc['blocking'] = now < float(npc.get('blockUntil') or 0) and npc['stamina'] > 0
-        if npc['blocking']:
-            npc['stamina'] = max(0, npc['stamina'] - 7*dt)
-        else:
-            npc['stamina'] = min(STAMINA_MAX, npc['stamina'] + 15*dt)
-        desired_x, desired_y = npc['wanderX'], npc['wanderY']
-        preferred = archetype['preferred']
-        if target:
-            angle = math.atan2(target['y']-npc['y'], target['x']-npc['x'])
-            if best > preferred:
-                desired_x, desired_y = target['x'], target['y']
-            elif best < preferred*.68:
-                desired_x = npc['x'] - math.cos(angle)*180
-                desired_y = npc['y'] - math.sin(angle)*180
-            else:
-                desired_x, desired_y = npc['x'], npc['y']
-            npc['direction'] = angle
-            npc['facing'] = 1 if math.cos(angle)>=0 else -1
-            if best <= 150 * float(npc.get('reachMult') or 1) and not npc['blocking']:
-                asyncio.create_task(npc_attack(room, npc, target))
-        dx, dy = desired_x-npc['x'], desired_y-npc['y']
-        length = math.hypot(dx,dy)
-        speed = SPEED * .62 * float(npc.get('speedMult') or 1)
-        if npc.get('rank') in ('Legendary','Mythic'): speed *= 1.08
-        if npc['blocking']: speed *= .32
-        target_vx = dx/length*speed if length>8 else 0
-        target_vy = dy/length*speed if length>8 else 0
-        blend = 1-math.exp(-8*dt)
-        npc['moveVx'] += (target_vx-npc['moveVx'])*blend
-        npc['moveVy'] += (target_vy-npc['moveVy'])*blend
-        decay = math.exp(-8.5*dt)
-        npc['impulseX'] *= decay; npc['impulseY'] *= decay
-        npc['vx'] = npc['moveVx']+npc['impulseX']; npc['vy'] = npc['moveVy']+npc['impulseY']
-        npc['moving'] = math.hypot(npc['moveVx'],npc['moveVy'])>5
-        if npc['moving'] and not target:
-            npc['direction'] = math.atan2(npc['moveVy'],npc['moveVx']); npc['facing'] = 1 if math.cos(npc['direction'])>=0 else -1
-        npc['x'] = clamp(npc['x']+npc['vx']*dt, zone['x1']+RADIUS, zone['x2']-RADIUS)
-        npc['y'] = clamp(npc['y']+npc['vy']*dt, zone['y1']+RADIUS, zone['y2']-RADIUS)
-
-        # Light separation keeps rival groups readable and prevents stacked sprites.
-        for other in room.get('npcs', {}).values():
-            if other is npc or other.get('knockedOut') or other.get('district') != district:
-                continue
-            ox, oy = npc['x']-other['x'], npc['y']-other['y']
-            dist = math.hypot(ox,oy)
-            if 0 < dist < 68:
-                push = (68-dist)*.18
-                npc['x'] += ox/dist*push; npc['y'] += oy/dist*push
-
 def simulate(room, dt, now):
     for player in connected(room):
         if now >= player.get('nextPassiveCoinAt', now + PASSIVE_COIN_INTERVAL):
@@ -1830,52 +1481,63 @@ def simulate(room, dt, now):
             player['missionStats']['minutes'] = player['missionStats'].get('minutes', 0) + 1
             player['records']['minutesOnline'] = player['records'].get('minutesOnline', 0) + 1
             player['records']['coinsEarned'] = player['records'].get('coinsEarned', 0) + PASSIVE_COIN_REWARD
-            reset_objective_periods(player)
-            objective_stats = player.setdefault('objectiveStats', {})
-            objective_stats['dailyMinutes'] = int(objective_stats.get('dailyMinutes') or 0) + 1
             asyncio.create_task(grant(player, xp=3, coins=PASSIVE_COIN_REWARD, reason='Time played'))
-            asyncio.create_task(check_objectives(player))
         if player['knockedOut'] and now >= player['respawnAt']:
             respawn(player)
-        if player['grabbedBy']:
-            holder = room['players'].get(player['grabbedBy'])
-            if not holder or not holder['connected'] or holder['grabbedTargetId'] != player['id']:
-                player['grabbedBy'] = None
-            else:
-                angle = holder.get('attackAngle') or holder.get('direction') or 0
-                player['x'] = clamp(holder['x'] + math.cos(angle) * 42, RADIUS, WORLD_W - RADIUS)
-                player['y'] = clamp(holder['y'] + math.sin(angle) * 42, RADIUS, WORLD_H - RADIUS)
-                player['vx'] = player['vy'] = player['moveVx'] = player['moveVy'] = 0
-                player['moving'] = player['blocking'] = player['sprinting'] = False
-                player['blockLeaseUntil'] = 0.0
-                continue
         if player.get('frozen') or now - float(player.get('lastInputAt') or now) > .75:
             player['input'] = sanitize_input({})
+
+        player['parrying'] = now < float(player.get('parryUntil') or 0)
         control = player['input']
         length = math.hypot(control['x'], control['y'])
         x = control['x'] / length if length > 1 else control['x']
         y = control['y'] / length if length > 1 else control['y']
-        can_act = not player['knockedOut']
-        block_lease = float(player.get('blockLeaseUntil') or 0)
-        if control.get('block') and now >= block_lease:
-            control['block'] = False
-        player['blocking'] = can_act and control['block'] and now < block_lease and player['stamina'] > 1 and not player['grabbedTargetId']
-        player['sprinting'] = can_act and not player['blocking'] and control['sprint'] and length > .08 and player['stamina'] > 1 and not player['grabbedTargetId']
+        stunned = now < float(player.get('stunnedUntil') or 0)
+        in_parry_recovery = now < float(player.get('parryRecoveryUntil') or 0)
+        combo_locked = bool(player.get('comboOwner'))
+        combo_attacking = bool(player.get('comboTarget'))
+        can_act = not player['knockedOut'] and not stunned and not combo_locked and not in_parry_recovery
+
+        if player.get('dashActive'):
+            desired_angle = player.get('dashAngle', player.get('direction', 0))
+            if length > .08:
+                desired_angle = math.atan2(y, x)
+            current = float(player.get('dashAngle') or 0)
+            diff = angle_difference(desired_angle, current)
+            max_turn = DASH_TURN_RATE * dt
+            current += clamp(diff, -max_turn, max_turn)
+            player['dashAngle'] = current
+            player['direction'] = current
+            player['facing'] = 1 if math.cos(current) >= 0 else -1
+            player['moving'] = True
+            player['sprinting'] = False
+            player['moveVx'] = math.cos(current) * DASH_SPEED
+            player['moveVy'] = math.sin(current) * DASH_SPEED
+            player['vx'] = player['moveVx'] + player['impulseX']
+            player['vy'] = player['moveVy'] + player['impulseY']
+            bound_w, bound_h = (ROOM_W, ROOM_H) if player.get('space','world').startswith('room:') else (WORLD_W, WORLD_H)
+            move_with_collisions(player, player['vx'] * dt, player['vy'] * dt, bound_w, bound_h)
+            player['impulseX'] *= math.exp(-8.5 * dt)
+            player['impulseY'] *= math.exp(-8.5 * dt)
+            if now >= float(player.get('dashEndAt') or 0):
+                player['dashActive'] = False
+                player['moveVx'] = player['moveVy'] = 0
+                if player.get('dashAttackPending'):
+                    player['dashAttackPending'] = False
+                    asyncio.create_task(start_attack(room, player, True))
+            continue
+
+        player['sprinting'] = can_act and not combo_attacking and control['sprint'] and length > .08 and player['stamina'] > 1 and not player['parrying']
         if player['sprinting']:
             player['stamina'] = max(0, player['stamina'] - SPRINT_DRAIN * dt)
             player['lastStaminaUseAt'] = now
         elif now - player['lastStaminaUseAt'] > .36:
-            regen_bonus = 1.12 if technique_active(player, 'Calm Breathing') else 1.0
-            player['stamina'] = min(STAMINA_MAX, player['stamina'] + STAMINA_REGEN * regen_bonus * (.45 if player['blocking'] else 1) * dt)
+            player['stamina'] = min(STAMINA_MAX, player['stamina'] + STAMINA_REGEN * dt)
+
         speed = SPEED * player.get('speedMult', 1)
-        if now < float(player.get('pursuitUntil') or 0): speed *= 1.12
         if player['sprinting']:
             speed *= SPRINT * player.get('sprintMult', 1)
-        if player['blocking']:
-            speed *= BLOCK_MOVE
-        if player['grabbedTargetId']:
-            speed *= .34
-        if not can_act:
+        if not can_act or player['parrying'] or combo_attacking:
             speed = 0
         target_vx = x * speed
         target_vy = y * speed
@@ -1883,17 +1545,36 @@ def simulate(room, dt, now):
         player['moveVx'] += (target_vx - player['moveVx']) * blend
         player['moveVy'] += (target_vy - player['moveVy']) * blend
         player['moving'] = math.hypot(player['moveVx'], player['moveVy']) > 5
-        if player['moving'] and not player['blocking']:
+        if player['moving'] and can_act and not player['parrying']:
             player['direction'] = math.atan2(player['moveVy'], player['moveVx'])
             player['facing'] = 1 if math.cos(player['direction']) >= 0 else -1
+
         decay = math.exp(-8.5 * dt)
         player['impulseX'] *= decay
         player['impulseY'] *= decay
         player['vx'] = player['moveVx'] + player['impulseX']
         player['vy'] = player['moveVy'] + player['impulseY']
         bound_w, bound_h = (ROOM_W, ROOM_H) if player.get('space','world').startswith('room:') else (WORLD_W, WORLD_H)
-        player['x'] = clamp(player['x'] + player['vx'] * dt, RADIUS, bound_w - RADIUS)
-        player['y'] = clamp(player['y'] + player['vy'] * dt, RADIUS, bound_h - RADIUS)
+        move_with_collisions(player, player['vx'] * dt, player['vy'] * dt, bound_w, bound_h)
+
+    players = connected(room)
+    for i, a in enumerate(players):
+        for b in players[i+1:]:
+            if a.get('space','world') != b.get('space','world'):
+                continue
+            if a.get('comboTarget') == b['id'] or b.get('comboTarget') == a['id']:
+                continue
+            dx, dy = b['x']-a['x'], b['y']-a['y']
+            distance = math.hypot(dx, dy)
+            minimum = RADIUS * 1.72
+            if distance >= minimum:
+                continue
+            if distance < .001:
+                dx, dy, distance = 1, 0, 1
+            push = (minimum-distance) * .5
+            nx, ny = dx/distance, dy/distance
+            move_with_collisions(a, -nx*push, -ny*push, ROOM_W if a.get('space','world').startswith('room:') else WORLD_W, ROOM_H if a.get('space','world').startswith('room:') else WORLD_H)
+            move_with_collisions(b, nx*push, ny*push, ROOM_W if b.get('space','world').startswith('room:') else WORLD_W, ROOM_H if b.get('space','world').startswith('room:') else WORLD_H)
 
 async def remove_later(room, player):
     await asyncio.sleep(RECONNECT_GRACE)
@@ -1981,8 +1662,7 @@ async def ws_handler(request):
                 if existing and player is existing:
                     if player.get('remove_task'): player['remove_task'].cancel(); player['remove_task']=None
                 room['players'][character_id] = player; room['sessions'][player['sessionToken']] = character_id
-                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['blockLeaseUntil']=player['lastInputAt']+.28 if player['input'].get('block') else 0.0; player['isAdmin']=False
-                reset_objective_periods(player)
+                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['isAdmin']=False
                 avatar = sanitize_avatar(source.get('avatar') or message.get('avatar'))
                 if avatar: room['avatars'][character_id]=avatar
                 room['loadouts'][character_id]=player.get('loadout') or {}
@@ -1998,19 +1678,12 @@ async def ws_handler(request):
             if message_type == 'input':
                 player['input'] = sanitize_input(message)
                 player['lastInputAt'] = time.monotonic()
-                if player['input'].get('block'):
-                    player['blockLeaseUntil'] = player['lastInputAt'] + .28
-                else:
-                    player['blockLeaseUntil'] = 0.0
-                    player['blocking'] = False
-            elif message_type == 'release-block':
-                player['input']['block'] = False; player['blocking'] = False; player['blockLeaseUntil'] = 0.0; player['lastInputAt'] = time.monotonic()
-            elif message_type == 'punch':
-                await punch(room, player)
-            elif message_type == 'grab-start':
-                await grab(room, player)
-            elif message_type == 'throw':
-                await throw(room, player)
+            elif message_type in ('attack', 'punch'):
+                await start_attack(room, player, False)
+            elif message_type == 'parry':
+                await parry(room, player)
+            elif message_type == 'dash':
+                await dash(room, player, message.get('x'), message.get('y'))
             elif message_type == 'interact':
                 pass
             elif message_type == 'buy-item':
@@ -2031,14 +1704,6 @@ async def ws_handler(request):
                 await set_weapon_path(room, player, message.get('itemId'), message.get('path'))
             elif message_type == 'customize-weapon':
                 await customize_weapon(room, player, message.get('itemId'), message.get('trail'), message.get('tint'), message.get('rotation'), message.get('name'))
-            elif message_type == 'open-capsule':
-                await open_capsule(room, player, message.get('kind'))
-            elif message_type == 'equip-technique':
-                await equip_technique(player, message.get('name'), message.get('active') is not False)
-            elif message_type == 'set-blueprint':
-                await set_weapon_blueprint(room, player, message.get('itemId'), message.get('blueprint'))
-            elif message_type == 'fast-travel':
-                await fast_travel(room, player, str(message.get('district') or ''))
             elif message_type == 'set-style':
                 await set_style(player, message.get('title'), message.get('theme'), message.get('accent'))
             elif message_type == 'spend-skill':
@@ -2070,7 +1735,7 @@ async def ws_handler(request):
                 player['connected'] = False
                 player['ws'] = None
                 player['input'] = sanitize_input({})
-                player['moving'] = player['blocking'] = player['sprinting'] = False
+                player['moving'] = player['blocking'] = player['sprinting'] = player['parrying'] = False
                 release(room, player)
                 save_character(player)
                 await snapshot(room)
@@ -2093,7 +1758,6 @@ async def game_loop(app):
         save_accumulator += dt
         for room in list(rooms.values()):
             simulate(room, dt, now)
-            simulate_npcs(room, dt, now)
         if snapshot_accumulator >= 1 / 30:
             snapshot_accumulator = 0
             for room in list(rooms.values()):
@@ -2110,11 +1774,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v25',
+        'service': 'green-floor-v26',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'v25-districts-multiplayer-rivals-capsules-objectives-ai-block-lease',
+        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-physics-combos-parry-dash-minimap-large-map',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
@@ -2124,7 +1788,6 @@ async def health(request):
 async def startup(app):
     db_connect().close()
     rooms[MAIN_WORLD_CODE] = make_room(MAIN_WORLD_CODE)
-    initialize_rivals(rooms[MAIN_WORLD_CODE])
     app['loop_task'] = asyncio.create_task(game_loop(app))
 
 
