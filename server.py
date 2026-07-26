@@ -42,6 +42,8 @@ RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
 VOICE_MAX_FRAME = 380
 VOICE_MIN_INTERVAL = 0.010
+CHAT_MAX_LENGTH = 140
+CHAT_COOLDOWN = 0.75
 MAIN_WORLD_CODE = "MAIN"
 ROOM_W = 920
 ROOM_H = 650
@@ -185,6 +187,12 @@ def clamp(v, a, b):
 def clean_name(v):
     s = ''.join(c for c in str(v or 'Player') if ord(c) >= 32 and c not in '<>').strip()[:24]
     return s or 'Player'
+
+
+def clean_chat_text(v):
+    # Keep chat plain text, remove control characters, and collapse whitespace.
+    text = ''.join(c for c in str(v or '') if ord(c) >= 32 and c not in '<>')
+    return ' '.join(text.split())[:CHAT_MAX_LENGTH]
 
 
 def room_code(v):
@@ -491,7 +499,7 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'inventory': sanitize_inventory(inventory),
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
-        'lastVoiceAt': 0.0, 'lastBoomAt': 0.0,
+        'lastVoiceAt': 0.0, 'lastBoomAt': 0.0, 'lastChatAt': 0.0,
         'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
         'roomArt': sanitize_room_art(room_art), 'roomRef': None,
@@ -555,7 +563,7 @@ def cancel_combo(room, attacker, release_target=True):
 
 
 def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
+    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastChatAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
     result = {k: v for k, v in player.items() if k not in excluded}
     result['inventoryCount'] = len(player.get('inventory') or [])
     weapon = (player.get('loadout') or {}).get('weapon')
@@ -1841,6 +1849,22 @@ async def ws_handler(request):
                 await dash(room, player, message.get('x'), message.get('y'))
             elif message_type == 'interact':
                 pass
+            elif message_type == 'chat':
+                text = clean_chat_text(message.get('text'))
+                now = time.monotonic()
+                if not text:
+                    continue
+                if now - float(player.get('lastChatAt') or 0) < CHAT_COOLDOWN:
+                    await send(ws, {'type':'chat-error','message':'You are sending messages too quickly.'})
+                    continue
+                player['lastChatAt'] = now
+                await broadcast(room, {
+                    'type':'chat',
+                    'id':player['id'],
+                    'name':player['name'],
+                    'text':text,
+                    'sentAt':int(time.time() * 1000),
+                }, space=player.get('space','world'))
             elif message_type == 'buy-item':
                 await buy_item(room, player, message.get('itemId'))
             elif message_type == 'craft-item':
