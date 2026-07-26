@@ -1,4 +1,4 @@
-# Green Floor V31 — Render server
+# Green Floor V32 — Render Pro server
 
 Build command: `pip install -r requirements.txt`
 
@@ -6,11 +6,8 @@ Start command: `python server.py`
 
 Health check: `/health`
 
-V31 makes combat server-authoritative and manual per hit. Each attack message can start or queue only one combo step. Misses, parries, interruptions, disconnects, and expired continuation windows release hitstun safely. After deployment, `/health` must report `"build": 31`.
+The included Blueprint uses `plan: pro`. Keep this service at one instance because live world and audio state are held in the process.
 
-Text chat is relayed by the Render WebSocket server. Messages are plain-text sanitized, limited to 140 characters, rate-limited, and delivered only to players in the sender's current world or personal room.
+V32 adds a 32 kHz IMA ADPCM WebSocket voice relay with dedicated bounded audio queues per player. Slow listeners no longer block every other listener, stale queued audio is dropped, and ping/pong heartbeat handling supports automatic client reconnection.
 
-This build supports synchronized `/e` emotes: dance, dance2, wave, cheer, laugh, point, and sit.
-
-
-V31 broadcasts emote-start events immediately and requires the matching V31 client, preventing silent connection to an older chat-only server.
+The server also owns boombox held/placed state. Boombox frames are delivered only to players in the boombox's current world or personal room. After deployment, `/health` must report `"build": 32`.

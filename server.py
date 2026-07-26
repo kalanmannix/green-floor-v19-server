@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 31
-PROTOCOL = 26
+BUILD = 32
+PROTOCOL = 27
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
@@ -40,8 +40,13 @@ ATTACK_QUEUE_LIMIT = 1
 KO_TIME = 3.0
 RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
-VOICE_MAX_FRAME = 380
-VOICE_MIN_INTERVAL = 0.010
+VOICE_CODEC_VERSION = 2
+VOICE_CLIENT_FRAME = 333
+VOICE_SERVER_FRAME = 349
+VOICE_MAX_FRAME = 420
+VOICE_MIN_INTERVAL = 0.012
+AUDIO_QUEUE_MAX = 18
+WS_HEARTBEAT = 15
 CHAT_MAX_LENGTH = 140
 CHAT_COOLDOWN = 0.75
 EMOTE_COOLDOWN = 0.35
@@ -498,6 +503,7 @@ def make_room(code):
         'sessions': {},
         'avatars': {},
         'loadouts': {},
+        'boomboxes': {},
         'createdAt': time.time(),
     }
 
@@ -531,6 +537,7 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
         'lastVoiceAt': 0.0, 'lastBoomAt': 0.0, 'lastChatAt': 0.0, 'lastEmoteAt': 0.0,
+        'audioQueue': None, 'audioTask': None,
         'emote': '', 'emoteUntil': 0.0, 'emoteSerial': 0,
         'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
@@ -595,7 +602,7 @@ def cancel_combo(room, attacker, release_target=True):
 
 
 def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastChatAt', 'lastEmoteAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt', 'emoteUntil'}
+    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastChatAt', 'lastEmoteAt', 'audioQueue', 'audioTask', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt', 'emoteUntil'}
     result = {k: v for k, v in player.items() if k not in excluded}
     result['inventoryCount'] = len(player.get('inventory') or [])
     weapon = (player.get('loadout') or {}).get('weapon')
@@ -621,15 +628,158 @@ def public_player(player):
     result['emoteSerial'] = int(player.get('emoteSerial') or 0)
     return result
 
+def clean_track_name(value):
+    return ''.join(ch for ch in str(value or '') if ch.isprintable()).strip()[:48] or 'Boombox track'
+
+
+def public_boombox(room, owner_id):
+    state = room.get('boomboxes', {}).get(owner_id)
+    if not state or not state.get('active'):
+        return None
+    owner = room.get('players', {}).get(owner_id)
+    result = dict(state)
+    if result.get('mode') == 'held' and owner:
+        result['x'] = float(owner.get('x') or 0)
+        result['y'] = float(owner.get('y') or 0)
+        result['space'] = owner.get('space', 'world')
+        result['facing'] = int(owner.get('facing') or 1)
+    result['ownerName'] = owner.get('name', 'Player') if owner else result.get('ownerName', 'Player')
+    return result
+
+
+async def broadcast_boombox_state(room, owner_id, previous_space=None):
+    state = public_boombox(room, owner_id)
+    if not state:
+        await broadcast(room, {'type': 'boombox-remove', 'ownerId': owner_id})
+        return
+    if previous_space and previous_space != state.get('space'):
+        await broadcast(room, {'type': 'boombox-remove', 'ownerId': owner_id}, space=previous_space)
+    await broadcast(room, {'type': 'boombox-state', 'boombox': state}, space=state.get('space'))
+
+
+async def control_boombox(room, player, action, track_name=None):
+    action = str(action or '').lower()
+    states = room.setdefault('boomboxes', {})
+    current = states.get(player['id'])
+    previous_space = current.get('space') if current else None
+    if action in ('start', 'load'):
+        serial = int((current or {}).get('serial') or 0) + 1
+        states[player['id']] = {
+            'id': f"boom-{player['id']}", 'ownerId': player['id'], 'ownerName': player['name'],
+            'mode': 'held', 'active': True, 'trackName': clean_track_name(track_name),
+            'x': float(player['x']), 'y': float(player['y']), 'space': player.get('space', 'world'),
+            'facing': int(player.get('facing') or 1), 'serial': serial,
+        }
+    elif action == 'place':
+        if not current or not current.get('active'):
+            await send(player['ws'], {'type': 'boombox-error', 'message': 'Choose a song for the boombox first.'})
+            return
+        facing = 1 if int(player.get('facing') or 1) >= 0 else -1
+        x = clamp(float(player['x']) + facing * 78, 34, (ROOM_W if player.get('space','world').startswith('room:') else WORLD_W) - 34)
+        y = clamp(float(player['y']) + 24, 34, (ROOM_H if player.get('space','world').startswith('room:') else WORLD_H) - 34)
+        if not player.get('space','world').startswith('room:') and is_position_blocked(x, y, 34):
+            x, y = float(player['x']), clamp(float(player['y']) + 84, 34, WORLD_H - 34)
+        current.update({'mode': 'placed', 'x': x, 'y': y, 'space': player.get('space','world'), 'facing': facing})
+    elif action in ('hold', 'pickup'):
+        if not current or not current.get('active'):
+            await send(player['ws'], {'type': 'boombox-error', 'message': 'Choose a song for the boombox first.'})
+            return
+        current.update({'mode': 'held', 'x': float(player['x']), 'y': float(player['y']), 'space': player.get('space','world'), 'facing': int(player.get('facing') or 1)})
+    elif action == 'stop':
+        if current:
+            states.pop(player['id'], None)
+            await broadcast(room, {'type': 'boombox-remove', 'ownerId': player['id']})
+        return
+    else:
+        return
+    await broadcast_boombox_state(room, player['id'], previous_space)
+
+
 def connected(room, space=None):
     players = [p for p in room['players'].values() if p['connected']]
     return players if space is None else [p for p in players if p.get('space','world') == space]
 
 
+_ws_send_locks = {}
+
+
+def ws_send_lock(ws):
+    return _ws_send_locks.setdefault(id(ws), asyncio.Lock())
+
+
+async def locked_send_text(ws, data):
+    if ws.closed:
+        return
+    async with ws_send_lock(ws):
+        if not ws.closed:
+            await ws.send_str(data)
+
+
+async def locked_send_bytes(ws, data):
+    if ws.closed:
+        return
+    async with ws_send_lock(ws):
+        if not ws.closed:
+            await ws.send_bytes(data)
+
+
+async def audio_sender(player):
+    try:
+        while player.get('connected') and player.get('ws') and not player['ws'].closed:
+            queue = player.get('audioQueue')
+            if queue is None:
+                return
+            packet = await queue.get()
+            ws = player.get('ws')
+            if not ws or ws.closed:
+                return
+            try:
+                await asyncio.wait_for(locked_send_bytes(ws, packet), timeout=0.12)
+            except (asyncio.TimeoutError, ConnectionError):
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return
+    except asyncio.CancelledError:
+        return
+
+
+def start_audio_sender(player):
+    task = player.get('audioTask')
+    if task and not task.done():
+        task.cancel()
+    player['audioQueue'] = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX)
+    player['audioTask'] = asyncio.create_task(audio_sender(player))
+
+
+def stop_audio_sender(player):
+    task = player.get('audioTask')
+    if task and not task.done():
+        task.cancel()
+    player['audioTask'] = None
+    player['audioQueue'] = None
+
+
+def enqueue_audio(player, packet):
+    queue = player.get('audioQueue')
+    if queue is None:
+        return
+    if queue.full():
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    try:
+        queue.put_nowait(packet)
+    except asyncio.QueueFull:
+        pass
+
+
 async def send(ws, obj):
     if not ws.closed:
         try:
-            await ws.send_str(json.dumps(obj, separators=(',', ':')))
+            await locked_send_text(ws, json.dumps(obj, separators=(',', ':')))
         except Exception:
             pass
 
@@ -640,7 +790,7 @@ async def broadcast(room, obj, exclude=None, space=None):
         if player['ws'] is exclude or player['ws'].closed:
             continue
         try:
-            await player['ws'].send_str(data)
+            await locked_send_text(player['ws'], data)
         except Exception:
             pass
 
@@ -668,6 +818,10 @@ async def snapshot(room):
             'serverTime': int(time.time() * 1000),
             'online': all_online,
             'space': receiver.get('space','world'),
+            'boomboxes': {
+                owner_id: state for owner_id in room.get('boomboxes', {})
+                if (state := public_boombox(room, owner_id)) and state.get('space') == receiver.get('space','world')
+            },
         })
 
 async def send_world(room, ws=None):
@@ -683,6 +837,10 @@ async def send_world(room, ws=None):
             'type': 'world-state',
             'pickups': [], 'event': None, 'zones': {}, 'catalog': [],
             'space': player.get('space','world'),
+            'boomboxes': {
+                owner_id: state for owner_id in room.get('boomboxes', {})
+                if (state := public_boombox(room, owner_id)) and state.get('space') == player.get('space','world')
+            },
         }
         if player.get('space','world').startswith('room:'):
             owner_id = player.get('roomOwner') or player.get('space','world').split(':',1)[1]
@@ -1373,6 +1531,9 @@ async def enter_personal_room(room, player, owner_id):
     player['space'] = f'room:{owner_id}'
     player['roomOwner'] = owner_id
     player['x'], player['y'] = 460, 350
+    if player['id'] in room.get('boomboxes', {}):
+        room['boomboxes'][player['id']].update({'mode':'held','space':player['space'],'x':player['x'],'y':player['y']})
+        await broadcast_boombox_state(room, player['id'])
     player['vx'] = player['vy'] = player['moveVx'] = player['moveVy'] = 0
     await send(player['ws'], {'type':'space-change','space':player['space'],'ownerId':owner_id,'ownerName':owner_name})
     await send_world(room, player['ws'])
@@ -1382,6 +1543,9 @@ async def leave_personal_room(room, player):
     release(room, player)
     player['space'] = 'world'; player['roomOwner'] = None
     player['x'], player['y'] = ROOM_DOOR[0], ROOM_DOOR[1]-100
+    if player['id'] in room.get('boomboxes', {}):
+        room['boomboxes'][player['id']].update({'mode':'held','space':'world','x':player['x'],'y':player['y']})
+        await broadcast_boombox_state(room, player['id'])
     player['vx'] = player['vy'] = player['moveVx'] = player['moveVy'] = 0
     await send(player['ws'], {'type':'space-change','space':'world'})
     await send_world(room, player['ws']); await snapshot(room)
@@ -1800,7 +1964,7 @@ async def remove_later(room, player):
 
 
 async def ws_handler(request):
-    ws = web.WebSocketResponse(max_msg_size=12_000_000, heartbeat=25, compress=False)
+    ws = web.WebSocketResponse(max_msg_size=12_000_000, heartbeat=WS_HEARTBEAT, autoping=True, compress=False)
     await ws.prepare(request)
     state = None
     try:
@@ -1811,23 +1975,27 @@ async def ws_handler(request):
                 room, player = state
                 data = bytes(msg.data)
                 now = time.monotonic()
-                # Audio frames: A = microphone voice, B = secret boombox music.
-                if len(data) != 329 or data[1:2] != b'\x01' or data[:1] not in (b'A', b'B'):
+                # A = microphone voice, B = boombox music. V2 is 32 kHz IMA ADPCM.
+                if len(data) != VOICE_CLIENT_FRAME or data[1] != VOICE_CODEC_VERSION or data[:1] not in (b'A', b'B'):
                     continue
-                clock_key = 'lastVoiceAt' if data[:1] == b'A' else 'lastBoomAt'
+                is_boombox = data[:1] == b'B'
+                if is_boombox:
+                    boom = public_boombox(room, player['id'])
+                    if not boom or not boom.get('active'):
+                        continue
+                    source_space = boom.get('space', player.get('space', 'world'))
+                    clock_key = 'lastBoomAt'
+                else:
+                    source_space = player.get('space', 'world')
+                    clock_key = 'lastVoiceAt'
                 if now - float(player.get(clock_key) or 0) < VOICE_MIN_INTERVAL:
                     continue
                 player[clock_key] = now
-                # Server packet keeps the frame type and inserts the 16-byte speaker id.
                 packet = data[:2] + player['id'].encode('ascii') + data[2:]
-                targets = connected(room, player.get('space', 'world'))
-                for other in targets:
+                for other in connected(room, source_space):
                     if other['ws'] is ws or other['ws'].closed:
                         continue
-                    try:
-                        await asyncio.wait_for(other['ws'].send_bytes(packet), timeout=0.20)
-                    except Exception:
-                        pass
+                    enqueue_audio(other, packet)
                 continue
             if msg.type != WSMsgType.TEXT:
                 continue
@@ -1849,7 +2017,7 @@ async def ws_handler(request):
                 existing = room['players'].get(character_id)
                 if existing and existing.get('connected'):
                     old_ws = existing.get('ws')
-                    existing['connected'] = False; existing['ws'] = None
+                    existing['connected'] = False; stop_audio_sender(existing); existing['ws'] = None
                     if old_ws:
                         await send(old_ws, {'type':'duplicate-login'})
                         try: await old_ws.close()
@@ -1869,7 +2037,7 @@ async def ws_handler(request):
                 if existing and player is existing:
                     if player.get('remove_task'): player['remove_task'].cancel(); player['remove_task']=None
                 room['players'][character_id] = player; room['sessions'][player['sessionToken']] = character_id
-                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['isAdmin']=False
+                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['isAdmin']=False; start_audio_sender(player)
                 avatar = sanitize_avatar(source.get('avatar') or message.get('avatar'))
                 if avatar: room['avatars'][character_id]=avatar
                 room['loadouts'][character_id]=player.get('loadout') or {}
@@ -1939,6 +2107,8 @@ async def ws_handler(request):
                     'text':text,
                     'sentAt':int(time.time() * 1000),
                 }, space=player.get('space','world'))
+            elif message_type == 'boombox-control':
+                await control_boombox(room, player, message.get('action'), message.get('trackName'))
             elif message_type == 'buy-item':
                 await buy_item(room, player, message.get('itemId'))
             elif message_type == 'craft-item':
@@ -1986,7 +2156,11 @@ async def ws_handler(request):
             room, player = state
             if player.get('ws') is ws:
                 player['connected'] = False
+                stop_audio_sender(player)
                 player['ws'] = None
+                if player['id'] in room.get('boomboxes', {}):
+                    room['boomboxes'].pop(player['id'], None)
+                    await broadcast(room, {'type':'boombox-remove','ownerId':player['id']})
                 player['input'] = sanitize_input({})
                 player['moving'] = player['blocking'] = player['sprinting'] = player['parrying'] = False
                 release(room, player)
@@ -2027,11 +2201,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v31',
+        'service': 'green-floor-v32-pro',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'manual-click-combos-distinct-procedural-attacks-v31',
+        'voice': '32khz-ima-adpcm-pro-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'manual-click-combos-distinct-procedural-attacks-v32',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
