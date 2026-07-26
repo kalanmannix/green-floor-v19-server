@@ -10,7 +10,7 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 29
+BUILD = 30
 PROTOCOL = 26
 MAX_PLAYERS = 16
 WORLD_W = 7200
@@ -35,6 +35,8 @@ DASH_COOLDOWN = 1.45
 DASH_SPEED = 690
 DASH_TURN_RATE = 4.25
 COMBO_RELEASE_PROTECTION = 0.34
+COMBO_INPUT_GRACE = 0.62
+ATTACK_QUEUE_LIMIT = 1
 KO_TIME = 3.0
 RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
@@ -58,12 +60,60 @@ ROOM_ART_MAX = 900000
 DB_PATH = os.getenv("DATABASE_PATH", "green_floor_v17.db")
 
 STYLE_DATA = {
-    "Street Brawler": {"delays":[0.00,0.23,0.25,0.29],"damage":[5,5,6,8],"knockback":[120,135,155,310],"kinds":["hook","cross","body","heavy"],"recovery":0.52,"reach":1.00},
-    "Boxer": {"delays":[0.00,0.16,0.17,0.18,0.22],"damage":[4,4,4,5,7],"knockback":[75,85,90,110,235],"kinds":["jab","cross","jab","hook","uppercut"],"recovery":0.36,"reach":0.94},
-    "Kickboxer": {"delays":[0.00,0.22,0.27,0.29],"damage":[5,5,7,8],"knockback":[100,120,175,290],"kinds":["jab","cross","kick","roundhouse"],"recovery":0.50,"reach":1.10},
-    "Karate": {"delays":[0.00,0.25,0.33],"damage":[7,7,10],"knockback":[130,160,345],"kinds":["straight","body","sidekick"],"recovery":0.56,"reach":1.07},
-    "Heavy Weapon": {"delays":[0.00,0.34,0.40],"damage":[8,9,12],"knockback":[165,205,420],"kinds":["weapon-heavy","weapon-heavy","weapon-finisher"],"recovery":0.72,"reach":1.16},
-    "Light Weapon": {"delays":[0.00,0.17,0.18,0.19,0.23],"damage":[4,4,5,5,7],"knockback":[85,95,105,120,260],"kinds":["weapon-light","weapon-light","weapon-light","weapon-light","weapon-finisher"],"recovery":0.38,"reach":1.02},
+    "Street Brawler": {
+        "kinds":["brawler-jab","brawler-cross","brawler-body-hook","brawler-uppercut","brawler-overhand"],
+        "hands":["left","right","left","right","right"],
+        "durations":[0.28,0.32,0.36,0.40,0.52],
+        "windups":[0.09,0.11,0.13,0.15,0.21],
+        "damage":[4,5,5,6,9], "knockback":[72,92,118,148,340],
+        "advance":[18,23,18,25,34], "targetAdvance":[10,14,14,18,44],
+        "recovery":0.52,"reach":1.00
+    },
+    "Boxer": {
+        "kinds":["boxer-jab","boxer-cross","boxer-lead-hook","boxer-uppercut","boxer-long-straight"],
+        "hands":["left","right","left","right","right"],
+        "durations":[0.22,0.25,0.29,0.33,0.38],
+        "windups":[0.065,0.075,0.095,0.115,0.13],
+        "damage":[3,4,4,5,7], "knockback":[52,66,78,96,235],
+        "advance":[15,20,15,20,28], "targetAdvance":[7,9,11,13,34],
+        "recovery":0.36,"reach":0.94
+    },
+    "Kickboxer": {
+        "kinds":["kickbox-jab","kickbox-cross","kickbox-low-kick","kickbox-knee","kickbox-roundhouse"],
+        "hands":["left","right","right","left","right"],
+        "durations":[0.25,0.29,0.36,0.39,0.49],
+        "windups":[0.075,0.09,0.13,0.14,0.19],
+        "damage":[4,4,6,6,9], "knockback":[66,78,112,128,315],
+        "advance":[15,20,12,24,30], "targetAdvance":[9,11,15,17,40],
+        "recovery":0.50,"reach":1.10
+    },
+    "Karate": {
+        "kinds":["karate-palm","karate-reverse-punch","karate-front-kick","karate-sidekick"],
+        "hands":["left","right","left","right"],
+        "durations":[0.28,0.32,0.39,0.50],
+        "windups":[0.09,0.105,0.145,0.20],
+        "damage":[5,6,7,10], "knockback":[82,110,150,350],
+        "advance":[16,23,20,32], "targetAdvance":[10,13,18,45],
+        "recovery":0.56,"reach":1.07
+    },
+    "Heavy Weapon": {
+        "kinds":["weapon-overhead","weapon-backhand","weapon-thrust-heavy","weapon-finisher"],
+        "hands":["right","right","right","right"],
+        "durations":[0.46,0.43,0.42,0.60],
+        "windups":[0.20,0.18,0.17,0.27],
+        "damage":[7,8,8,13], "knockback":[130,155,178,440],
+        "advance":[23,21,30,38], "targetAdvance":[14,16,20,50],
+        "recovery":0.72,"reach":1.16
+    },
+    "Light Weapon": {
+        "kinds":["weapon-diagonal","weapon-backslash","weapon-thrust","weapon-rising-cut","weapon-spin-finisher"],
+        "hands":["right","right","right","right","right"],
+        "durations":[0.25,0.27,0.29,0.31,0.43],
+        "windups":[0.075,0.085,0.09,0.10,0.16],
+        "damage":[3,4,4,5,8], "knockback":[58,70,82,98,275],
+        "advance":[16,18,24,18,30], "targetAdvance":[8,10,12,13,38],
+        "recovery":0.38,"reach":1.02
+    },
 }
 STYLE_ALIASES = {"Street Fighting":"Street Brawler","Boxing":"Boxer","Muay Thai":"Kickboxer","Wrestling":"Street Brawler","Judo":"Street Brawler"}
 BUILDINGS = [
@@ -434,6 +484,8 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'parryUntil': 0, 'parryRecoveryUntil': 0, 'parryReadyAt': 0,
         'dashActive': False, 'dashEndAt': 0, 'dashReadyAt': 0, 'dashAngle': 0, 'dashAttackPending': False,
         'comboOwner': None, 'comboTarget': None, 'comboStep': -1, 'comboLength': 0, 'comboToken': 0,
+        'comboDeadline': 0, 'comboDashStarter': False,
+        'attackAnimatingUntil': 0, 'attackQueueOpenAt': 0, 'attackQueued': False, 'attackActionSerial': 0,
         'space': 'world', 'roomOwner': None,
         'title': 'New Student',
         'inventory': sanitize_inventory(inventory),
@@ -484,15 +536,22 @@ def move_with_collisions(player, dx, dy, bound_w=WORLD_W, bound_h=WORLD_H):
 
 def cancel_combo(room, attacker, release_target=True):
     attacker['comboToken'] = int(attacker.get('comboToken') or 0) + 1
+    attacker['attackActionSerial'] = int(attacker.get('attackActionSerial') or 0) + 1
     target_id = attacker.get('comboTarget')
     attacker['comboTarget'] = None
     attacker['comboStep'] = -1
     attacker['comboLength'] = 0
-    if release_target and target_id:
+    attacker['comboDeadline'] = 0
+    attacker['comboDashStarter'] = False
+    attacker['attackQueued'] = False
+    attacker['attackAnimatingUntil'] = 0
+    attacker['attackQueueOpenAt'] = 0
+    if release_target and target_id and target_id != 'training-dummy':
         target = room['players'].get(target_id)
         if target and target.get('comboOwner') == attacker['id']:
             target['comboOwner'] = None
             target['stunnedUntil'] = min(float(target.get('stunnedUntil') or 0), time.monotonic() + 0.06)
+            target['invulnerableUntil'] = max(float(target.get('invulnerableUntil') or 0), time.monotonic() + COMBO_RELEASE_PROTECTION)
 
 
 def public_player(player):
@@ -602,6 +661,14 @@ def nearest(room, attacker, max_distance):
 
 
 def release(room, player):
+    if player.get('comboTarget'):
+        cancel_combo(room, player, release_target=True)
+    if player.get('comboOwner'):
+        owner = room['players'].get(player.get('comboOwner'))
+        player['comboOwner'] = None
+        player['stunnedUntil'] = min(float(player.get('stunnedUntil') or 0), time.monotonic() + 0.06)
+        if owner and owner.get('comboTarget') == player['id']:
+            cancel_combo(room, owner, release_target=False)
     if player.get('grabbedTargetId'):
         target = room['players'].get(player['grabbedTargetId'])
         player['grabbedTargetId'] = None
@@ -880,42 +947,14 @@ def respawn(player):
     player['comboOwner'] = player['comboTarget'] = None
     player['comboStep'] = -1
     player['comboLength'] = 0
+    player['comboDeadline'] = 0
+    player['comboDashStarter'] = False
+    player['attackQueued'] = False
+    player['attackAnimatingUntil'] = 0
+    player['attackQueueOpenAt'] = 0
     player['comboToken'] = int(player.get('comboToken') or 0) + 1
+    player['attackActionSerial'] = int(player.get('attackActionSerial') or 0) + 1
 
-
-async def training_hit(room, attacker, dash_attack=False):
-    if attacker.get('space','world') != 'world':
-        return False
-    style_name = effective_style(attacker)
-    style = STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler'])
-    distance = math.hypot(DUMMY_X - attacker['x'], DUMMY_Y - attacker['y'])
-    reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
-    if distance > (PUNCH_RANGE + (34 if dash_attack else 0)) * reach_mult:
-        return False
-    angle = math.atan2(DUMMY_Y - attacker['y'], DUMMY_X - attacker['x'])
-    attacker['attackAngle'] = angle
-    attacker['direction'] = angle
-    attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
-    token = int(attacker.get('comboToken') or 0) + 1
-    attacker['comboToken'] = token
-    for step, kind in enumerate(style['kinds']):
-        if step > 0:
-            await asyncio.sleep(style['delays'][step])
-        if int(attacker.get('comboToken') or 0) != token or attacker.get('knockedOut'):
-            return True
-        attacker['attackHand'] = 'left' if step % 2 else 'right'
-        attacker['attackKind'] = kind
-        attacker['comboStep'] = step
-        move_with_collisions(attacker, math.cos(angle) * 20, math.sin(angle) * 20)
-        await broadcast(room, {'type':'combat','event':{
-            'kind':'training-hit','attackerId':attacker['id'],'targetId':'training-dummy','angle':angle,
-            'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
-            'hit':True,'damage':0,'knockedOut':False,'finisher':step == len(style['kinds'])-1,
-            'dashAttack':dash_attack and step == 0,'durationMs':round(max(.18, style['delays'][min(step+1,len(style['delays'])-1)])*1000),
-            'style':style_name,'x':DUMMY_X,'y':DUMMY_Y-58
-        }}, space='world')
-    attacker['attackRecoveryUntil'] = time.monotonic() + float(style.get('recovery') or .3)
-    return True
 
 def angle_difference(a, b):
     return (a - b + math.pi) % math.tau - math.pi
@@ -1014,175 +1053,255 @@ async def resolve_parry(room, attacker, defender, angle):
     }}, space=attacker.get('space','world'))
 
 
-async def start_attack(room, attacker, dash_attack=False):
+async def broadcast_attack_start(room, attacker, target_id, style_name, style, step, kind, duration, windup, dash_attack=False):
+    await broadcast(room, {'type':'combat','event':{
+        'kind':'attack-step','attackerId':attacker['id'],'targetId':target_id,
+        'angle':attacker.get('attackAngle', attacker.get('direction', 0)),
+        'hand':attacker.get('attackHand','right'),'attackKind':kind,
+        'comboStep':step,'comboLength':len(style['kinds']),
+        'hit':False,'dashAttack':dash_attack and step == 0,
+        'durationMs':round(duration*1000),'contactMs':round(windup*1000),'style':style_name,
+        'x':attacker['x']+math.cos(attacker.get('attackAngle',0))*80,
+        'y':attacker['y']+math.sin(attacker.get('attackAngle',0))*80-46
+    }}, space=attacker.get('space','world'))
+
+
+def style_speed(attacker):
+    speed = float(attacker.get('attackSpeedMult') or 1)
+    weapon = (attacker.get('loadout') or {}).get('weapon')
+    if weapon:
+        path = str(weapon.get('path') or 'balanced')
+        speed *= {'balanced':1.0,'power':0.94,'swift':1.16,'reach':0.98}.get(path,1.0)
+        speed *= 1 + max(0, int(weapon.get('masteryRank') or 1)-1)*0.008
+    return clamp(speed, 0.72, 1.48)
+
+
+def move_timing(attacker, style, step):
+    speed = style_speed(attacker)
+    duration = float(style['durations'][step]) / speed
+    windup = min(duration * 0.68, float(style['windups'][step]) / speed)
+    return max(0.18, duration), max(0.045, windup)
+
+
+def target_position(room, target_id):
+    if target_id == 'training-dummy':
+        return DUMMY_X, DUMMY_Y
+    target = room['players'].get(target_id)
+    if not target:
+        return None
+    return target['x'], target['y']
+
+
+def training_target_available(attacker, max_distance):
+    if attacker.get('space','world') != 'world':
+        return False, float('inf')
+    distance = math.hypot(DUMMY_X-attacker['x'], DUMMY_Y-attacker['y'])
+    return distance <= max_distance, distance
+
+
+async def finish_manual_attack(room, attacker_id, token_value, action_serial, style_name, step, hit_confirmed, final):
+    attacker = room['players'].get(attacker_id)
+    if not attacker:
+        return
+    now = time.monotonic()
+    if int(attacker.get('comboToken') or 0) != token_value or int(attacker.get('attackActionSerial') or 0) != action_serial:
+        return
+    attacker['attackAnimatingUntil'] = 0
+    attacker['attackQueueOpenAt'] = 0
+    if final:
+        target_id = attacker.get('comboTarget')
+        attacker['attackQueued'] = False
+        attacker['attackRecoveryUntil'] = now + float(STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler']).get('recovery') or .4)
+        cancel_combo(room, attacker, release_target=True)
+        return
+    if hit_confirmed and attacker.get('attackQueued') and attacker.get('comboTarget'):
+        attacker['attackQueued'] = False
+        await start_attack(room, attacker, False, from_queue=True)
+        return
+    if not hit_confirmed:
+        attacker['attackQueued'] = False
+        attacker['attackRecoveryUntil'] = now + 0.22
+        cancel_combo(room, attacker, release_target=True)
+
+
+async def resolve_manual_attack(room, attacker_id, token_value, action_serial, style_name, step, target_id, dash_attack, duration, windup):
+    await asyncio.sleep(windup)
+    attacker = room['players'].get(attacker_id)
+    if not attacker:
+        return
+    now = time.monotonic()
+    if int(attacker.get('comboToken') or 0) != token_value or int(attacker.get('attackActionSerial') or 0) != action_serial:
+        return
+    if attacker.get('knockedOut') or now < float(attacker.get('stunnedUntil') or 0):
+        cancel_combo(room, attacker)
+        return
+    style = STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler'])
+    kind = style['kinds'][step]
+    position = target_position(room, target_id)
+    hit_confirmed = False
+    final = step == len(style['kinds'])-1
+    if position:
+        tx, ty = position
+        angle = math.atan2(ty-attacker['y'], tx-attacker['x'])
+        distance = math.hypot(tx-attacker['x'], ty-attacker['y'])
+        weapon = (attacker.get('loadout') or {}).get('weapon')
+        reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
+        if weapon:
+            reach_mult *= float(attacker.get('weaponReachMult') or 1)
+        step_reach = (PUNCH_RANGE + (30 if dash_attack and step == 0 else 0) + min(32, step*6)) * reach_mult
+        if distance <= step_reach:
+            attacker['attackAngle'] = angle
+            attacker['direction'] = angle
+            attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
+            if target_id == 'training-dummy':
+                hit_confirmed = True
+                attacker['comboTarget'] = 'training-dummy'
+                attacker['comboStep'] = step
+                attacker['comboLength'] = len(style['kinds'])
+                attacker['comboDeadline'] = time.monotonic() + max(COMBO_INPUT_GRACE, duration-windup+0.30)
+                await broadcast(room, {'type':'combat','event':{
+                    'kind':'attack-impact','attackerId':attacker_id,'targetId':'training-dummy','angle':angle,
+                    'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
+                    'hit':True,'damage':0,'knockedOut':False,'finisher':final,'dashAttack':dash_attack and step == 0,
+                    'durationMs':round(duration*1000),'style':style_name,'x':DUMMY_X,'y':DUMMY_Y-58
+                }}, space='world')
+            else:
+                target = room['players'].get(target_id)
+                if target and target.get('connected') and target.get('space','world') == attacker.get('space','world') and not target.get('knockedOut'):
+                    if time.monotonic() < float(target.get('parryUntil') or 0) and parry_faces_attacker(target, attacker):
+                        await resolve_parry(room, attacker, target, angle)
+                        return
+                    # Interrupt a different combo owner immediately.
+                    if target.get('comboTarget'):
+                        cancel_combo(room, target)
+                    if target.get('comboOwner') and target.get('comboOwner') != attacker_id:
+                        hit_confirmed = False
+                    else:
+                        hit_confirmed = True
+                        attacker['comboTarget'] = target_id
+                        attacker['comboStep'] = step
+                        attacker['comboLength'] = len(style['kinds'])
+                        target['comboOwner'] = attacker_id
+                        attacker['comboDeadline'] = time.monotonic() + max(COMBO_INPUT_GRACE, duration-windup+0.30)
+                        base_damage = style['damage'][step]
+                        if weapon:
+                            level = int(weapon.get('level') or 1)
+                            mastery = int(weapon.get('masteryRank') or 1)
+                            progression_mult = min(1.72, 1 + max(0, level-1)*0.017 + max(0, mastery-1)*0.022)
+                            damage_mult = float(attacker.get('weaponDamageMult') or 1) * progression_mult
+                        else:
+                            damage_mult = float(attacker.get('punchDamageMult') or 1)
+                        if dash_attack and step == 0:
+                            damage_mult *= 1.08
+                        damage = max(1, round(base_damage * damage_mult))
+                        target['health'] = max(0, float(target.get('health') or 0)-damage)
+                        knockback = float(style['knockback'][step]) * (1.12 if dash_attack and step == 0 else 1)
+                        target['impulseX'] += math.cos(angle)*knockback
+                        target['impulseY'] += math.sin(angle)*knockback
+                        attacker['impulseX'] += math.cos(angle)*min(128, knockback*.30)
+                        attacker['impulseY'] += math.sin(angle)*min(128, knockback*.30)
+                        move_with_collisions(attacker, math.cos(angle)*float(style['advance'][step]), math.sin(angle)*float(style['advance'][step]))
+                        move_with_collisions(target, math.cos(angle)*float(style['targetAdvance'][step]), math.sin(angle)*float(style['targetAdvance'][step]))
+                        target['stunnedUntil'] = max(float(target.get('stunnedUntil') or 0), attacker['comboDeadline'] + 0.05)
+                        target['moving'] = target['sprinting'] = False
+                        target['moveVx'] = target['moveVy'] = 0
+                        target['parrying'] = False
+                        target['parryUntil'] = 0
+                        knocked_out = target['health'] <= 0
+                        if knocked_out:
+                            knockout(room, target, attacker)
+                            asyncio.create_task(reward_knockout(attacker))
+                        await broadcast(room, {'type':'combat','event':{
+                            'kind':'attack-impact','attackerId':attacker_id,'targetId':target_id,'angle':angle,
+                            'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
+                            'hit':True,'damage':damage,'knockedOut':knocked_out,'finisher':final,'dashAttack':dash_attack and step == 0,
+                            'durationMs':round(duration*1000),'style':style_name,
+                            'x':(attacker['x']+target['x'])/2,'y':(attacker['y']+target['y'])/2-48
+                        }}, space=attacker.get('space','world'))
+                        if weapon:
+                            asyncio.create_task(award_weapon_mastery(room, attacker, 12 if knocked_out else 7, knockout=knocked_out))
+                        if knocked_out:
+                            final = True
+    remaining = max(0, duration-windup)
+    await asyncio.sleep(remaining)
+    await finish_manual_attack(room, attacker_id, token_value, action_serial, style_name, step, hit_confirmed, final)
+
+
+async def start_attack(room, attacker, dash_attack=False, from_queue=False):
     now = time.monotonic()
     if attacker.get('knockedOut') or now < float(attacker.get('stunnedUntil') or 0) or now < float(attacker.get('parryRecoveryUntil') or 0):
         return
-    if attacker.get('comboOwner') or attacker.get('comboTarget'):
+    if attacker.get('comboOwner'):
         return
     if attacker.get('dashActive') and not dash_attack:
         return
-    if not dash_attack and now < float(attacker.get('attackRecoveryUntil') or 0):
+    if now < float(attacker.get('attackAnimatingUntil') or 0):
+        if not dash_attack and not attacker.get('attackQueued'):
+            attacker['attackQueued'] = True
+        return
+    if not from_queue and not attacker.get('comboTarget') and not dash_attack and now < float(attacker.get('attackRecoveryUntil') or 0):
         return
 
     style_name = effective_style(attacker)
     style = STYLE_DATA[style_name]
-    weapon = (attacker.get('loadout') or {}).get('weapon')
-    reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
-    if weapon:
-        reach_mult *= float(attacker.get('weaponReachMult') or 1)
-    lock_distance = (280 if dash_attack else PUNCH_LOCK) * reach_mult
-    target, distance = nearest_combat_target(room, attacker, lock_distance)
-    angle = float(attacker.get('dashAngle') if dash_attack else attacker.get('direction') or 0)
-    if target:
-        angle = math.atan2(target['y'] - attacker['y'], target['x'] - attacker['x'])
-    attacker['attackAngle'] = angle
-    attacker['direction'] = angle
-    attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
+    combo_target = attacker.get('comboTarget')
+    if combo_target and now > float(attacker.get('comboDeadline') or 0):
+        cancel_combo(room, attacker)
+        combo_target = None
+    if combo_target:
+        step = int(attacker.get('comboStep') or 0) + 1
+        if step >= len(style['kinds']):
+            cancel_combo(room, attacker)
+            return
+        target_id = combo_target
+        token_value = int(attacker.get('comboToken') or 0)
+    else:
+        step = 0
+        weapon = (attacker.get('loadout') or {}).get('weapon')
+        reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
+        if weapon:
+            reach_mult *= float(attacker.get('weaponReachMult') or 1)
+        lock_distance = (300 if dash_attack else PUNCH_LOCK) * reach_mult
+        target, player_distance = nearest_combat_target(room, attacker, lock_distance)
+        dummy_ok, dummy_distance = training_target_available(attacker, lock_distance)
+        target_id = None
+        if target and (not dummy_ok or player_distance <= dummy_distance):
+            target_id = target['id']
+        elif dummy_ok:
+            target_id = 'training-dummy'
+        angle = float(attacker.get('dashAngle') if dash_attack else attacker.get('direction') or 0)
+        if target_id:
+            position = target_position(room, target_id)
+            if position:
+                angle = math.atan2(position[1]-attacker['y'], position[0]-attacker['x'])
+        attacker['attackAngle'] = angle
+        attacker['direction'] = angle
+        attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
+        attacker['comboToken'] = int(attacker.get('comboToken') or 0) + 1
+        token_value = int(attacker['comboToken'])
+        attacker['comboStep'] = -1
+        attacker['comboLength'] = len(style['kinds'])
+        attacker['comboDashStarter'] = bool(dash_attack)
+
+    duration, windup = move_timing(attacker, style, step)
+    kind = style['kinds'][step]
+    hand = style.get('hands',[])[step] if step < len(style.get('hands',[])) else ('left' if step % 2 == 0 else 'right')
+    attacker['attackHand'] = hand
+    attacker['attackKind'] = kind
+    attacker['attackAngle'] = float(attacker.get('attackAngle') or attacker.get('direction') or 0)
     attacker['sprinting'] = False
     attacker['parrying'] = False
     attacker['parryUntil'] = 0
     attacker['dashActive'] = False
     attacker['dashAttackPending'] = False
     attacker['lastPunchAt'] = now
-
-    opening_reach = (PUNCH_RANGE + (24 if dash_attack else 0)) * reach_mult
-    if not target or distance > opening_reach:
-        if await training_hit(room, attacker, dash_attack):
-            return
-        attacker['attackRecoveryUntil'] = now + (0.58 if dash_attack else 0.34)
-        await broadcast(room, {'type':'combat','event':{
-            'kind':'dash-whiff' if dash_attack else 'attack-whiff','attackerId':attacker['id'],
-            'targetId':target['id'] if target else None,'angle':angle,'hand':attacker.get('attackHand','right'),
-            'attackKind':'dash' if dash_attack else style['kinds'][0],'comboStep':0,'comboLength':len(style['kinds']),
-            'hit':False,'durationMs':420 if dash_attack else 300,'style':style_name,
-            'x':attacker['x']+math.cos(angle)*92,'y':attacker['y']+math.sin(angle)*92-46
-        }}, space=attacker.get('space','world'))
-        return
-
-    if time.monotonic() < float(target.get('parryUntil') or 0) and parry_faces_attacker(target, attacker):
-        await resolve_parry(room, attacker, target, angle)
-        return
-
-    token_value = int(attacker.get('comboToken') or 0) + 1
-    attacker['comboToken'] = token_value
-    attacker['comboTarget'] = target['id']
-    attacker['comboStep'] = 0
-    attacker['comboLength'] = len(style['kinds'])
-    target['comboOwner'] = attacker['id']
-    target['stunnedUntil'] = now + 0.45
-    asyncio.create_task(run_combo(room, attacker['id'], target['id'], token_value, style_name, dash_attack))
-
-
-async def run_combo(room, attacker_id, target_id, token_value, style_name, dash_attack=False):
-    style = STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler'])
-    delays = style['delays']
-    weapon_gain_awarded = False
-    for step, kind in enumerate(style['kinds']):
-        if step > 0:
-            await asyncio.sleep(delays[step])
-        attacker = room['players'].get(attacker_id)
-        target = room['players'].get(target_id)
-        now = time.monotonic()
-        if not attacker or not target or not attacker.get('connected') or not target.get('connected'):
-            if attacker: cancel_combo(room, attacker)
-            return
-        if int(attacker.get('comboToken') or 0) != token_value or attacker.get('comboTarget') != target_id or target.get('comboOwner') != attacker_id:
-            cancel_combo(room, attacker)
-            return
-        if attacker.get('knockedOut') or target.get('knockedOut') or now < float(attacker.get('stunnedUntil') or 0):
-            cancel_combo(room, attacker)
-            return
-        if attacker.get('space','world') != target.get('space','world'):
-            cancel_combo(room, attacker)
-            return
-
-        angle = math.atan2(target['y'] - attacker['y'], target['x'] - attacker['x'])
-        distance = math.hypot(target['x'] - attacker['x'], target['y'] - attacker['y'])
-        weapon = (attacker.get('loadout') or {}).get('weapon')
-        reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
-        if weapon:
-            reach_mult *= float(attacker.get('weaponReachMult') or 1)
-        max_step_distance = (PUNCH_RANGE + 74) * reach_mult
-        if distance > max_step_distance:
-            cancel_combo(room, attacker)
-            attacker['attackRecoveryUntil'] = now + 0.28
-            return
-
-        # A third player can interrupt the attacker; the locked victim cannot be handed off.
-        if target.get('comboTarget'):
-            cancel_combo(room, target)
-
-        attacker['attackAngle'] = angle
-        attacker['direction'] = angle
-        attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
-        attacker['attackHand'] = 'left' if step % 2 else 'right'
-        attacker['attackKind'] = kind
-        attacker['comboStep'] = step
-
-        base_damage = style['damage'][step]
-        if weapon:
-            level = int(weapon.get('level') or 1)
-            mastery = int(weapon.get('masteryRank') or 1)
-            progression_mult = min(1.72, 1 + max(0, level-1)*0.017 + max(0, mastery-1)*0.022)
-            damage_mult = float(attacker.get('weaponDamageMult') or 1) * progression_mult
-        else:
-            damage_mult = float(attacker.get('punchDamageMult') or 1)
-        if dash_attack and step == 0:
-            damage_mult *= 1.08
-        damage = max(1, round(base_damage * damage_mult))
-        target['health'] = max(0, float(target.get('health') or 0) - damage)
-
-        final = step == len(style['kinds']) - 1
-        knockback = style['knockback'][step] * (1.12 if dash_attack and step == 0 else 1)
-        target['impulseX'] += math.cos(angle) * knockback
-        target['impulseY'] += math.sin(angle) * knockback
-        attacker['impulseX'] += math.cos(angle) * min(155, knockback * .42)
-        attacker['impulseY'] += math.sin(angle) * min(155, knockback * .42)
-        move_with_collisions(attacker, math.cos(angle) * (24 if not final else 34), math.sin(angle) * (24 if not final else 34))
-        move_with_collisions(target, math.cos(angle) * (18 if not final else 42), math.sin(angle) * (18 if not final else 42))
-
-        next_gap = delays[step+1] if step + 1 < len(delays) else float(style['recovery'])
-        target['stunnedUntil'] = now + next_gap + (0.16 if not final else 0.28)
-        target['moving'] = target['sprinting'] = False
-        target['moveVx'] = target['moveVy'] = 0
-        target['parrying'] = False
-        target['parryUntil'] = 0
-
-        knocked_out = target['health'] <= 0
-        if knocked_out:
-            knockout(room, target, attacker)
-            asyncio.create_task(reward_knockout(attacker))
-
-        await broadcast(room, {'type':'combat','event':{
-            'kind':'combo-hit','attackerId':attacker_id,'targetId':target_id,'angle':angle,
-            'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
-            'hit':True,'damage':damage,'knockedOut':knocked_out,'finisher':final,'dashAttack':dash_attack and step == 0,
-            'durationMs':round(max(.18, next_gap) * 1000),'style':style_name,
-            'x':(attacker['x']+target['x'])/2,'y':(attacker['y']+target['y'])/2-48
-        }}, space=attacker.get('space','world'))
-
-        if weapon and not weapon_gain_awarded:
-            weapon_gain_awarded = True
-            asyncio.create_task(award_weapon_mastery(room, attacker, 12 if knocked_out else 7, knockout=knocked_out))
-
-        if knocked_out:
-            cancel_combo(room, attacker, release_target=False)
-            target['comboOwner'] = None
-            return
-
-    attacker = room['players'].get(attacker_id)
-    target = room['players'].get(target_id)
-    now = time.monotonic()
-    if attacker and int(attacker.get('comboToken') or 0) == token_value:
-        attacker['comboTarget'] = None
-        attacker['comboStep'] = -1
-        attacker['comboLength'] = 0
-        attacker['attackRecoveryUntil'] = now + float(style['recovery'])
-    if target and target.get('comboOwner') == attacker_id:
-        target['comboOwner'] = None
-        target['stunnedUntil'] = now + 0.16
-        target['invulnerableUntil'] = now + COMBO_RELEASE_PROTECTION
+    attacker['attackQueued'] = False
+    attacker['attackAnimatingUntil'] = now + duration
+    attacker['attackQueueOpenAt'] = now + min(duration*.32, 0.14)
+    attacker['attackActionSerial'] = int(attacker.get('attackActionSerial') or 0) + 1
+    action_serial = int(attacker['attackActionSerial'])
+    await broadcast_attack_start(room, attacker, target_id, style_name, style, step, kind, duration, windup, dash_attack)
+    asyncio.create_task(resolve_manual_attack(room, attacker['id'], token_value, action_serial, style_name, step, target_id, dash_attack, duration, windup))
 
 
 async def punch(room, attacker):
@@ -1522,6 +1641,8 @@ def simulate(room, dt, now):
             player['input'] = sanitize_input({})
 
         player['parrying'] = now < float(player.get('parryUntil') or 0)
+        if player.get('comboTarget') and now > float(player.get('comboDeadline') or 0) and now >= float(player.get('attackAnimatingUntil') or 0):
+            cancel_combo(room, player, release_target=True)
         control = player['input']
         length = math.hypot(control['x'], control['y'])
         x = control['x'] / length if length > 1 else control['x']
@@ -1808,11 +1929,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v29',
+        'service': 'green-floor-v30',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-procedural-physics-animation-v29',
+        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'manual-click-combos-distinct-procedural-attacks-v30',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
