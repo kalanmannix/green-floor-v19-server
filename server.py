@@ -10,7 +10,7 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 30
+BUILD = 31
 PROTOCOL = 26
 MAX_PLAYERS = 16
 WORLD_W = 7200
@@ -44,6 +44,25 @@ VOICE_MAX_FRAME = 380
 VOICE_MIN_INTERVAL = 0.010
 CHAT_MAX_LENGTH = 140
 CHAT_COOLDOWN = 0.75
+EMOTE_COOLDOWN = 0.35
+EMOTE_DURATIONS = {
+    'dance': 8.0,
+    'dance2': 8.0,
+    'wave': 4.0,
+    'cheer': 4.0,
+    'laugh': 4.5,
+    'point': 4.0,
+    'sit': 10.0,
+}
+EMOTE_ALIASES = {
+    'dance': 'dance', 'dance1': 'dance',
+    'dance2': 'dance2',
+    'wave': 'wave', 'hello': 'wave',
+    'cheer': 'cheer', 'celebrate': 'cheer',
+    'laugh': 'laugh', 'lol': 'laugh',
+    'point': 'point',
+    'sit': 'sit',
+}
 MAIN_WORLD_CODE = "MAIN"
 ROOM_W = 920
 ROOM_H = 650
@@ -193,6 +212,18 @@ def clean_chat_text(v):
     # Keep chat plain text, remove control characters, and collapse whitespace.
     text = ''.join(c for c in str(v or '') if ord(c) >= 32 and c not in '<>')
     return ' '.join(text.split())[:CHAT_MAX_LENGTH]
+
+
+def clean_emote(v):
+    key = ''.join(c for c in str(v or '').lower().strip() if c.isalnum())[:16]
+    return EMOTE_ALIASES.get(key, '')
+
+
+def cancel_emote(player):
+    if player.get('emote'):
+        player['emote'] = ''
+        player['emoteUntil'] = 0.0
+        player['emoteSerial'] = int(player.get('emoteSerial') or 0) + 1
 
 
 def room_code(v):
@@ -499,7 +530,8 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'inventory': sanitize_inventory(inventory),
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
-        'lastVoiceAt': 0.0, 'lastBoomAt': 0.0, 'lastChatAt': 0.0,
+        'lastVoiceAt': 0.0, 'lastBoomAt': 0.0, 'lastChatAt': 0.0, 'lastEmoteAt': 0.0,
+        'emote': '', 'emoteUntil': 0.0, 'emoteSerial': 0,
         'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
         'roomArt': sanitize_room_art(room_art), 'roomRef': None,
@@ -563,7 +595,7 @@ def cancel_combo(room, attacker, release_target=True):
 
 
 def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastChatAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt'}
+    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastChatAt', 'lastEmoteAt', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt', 'emoteUntil'}
     result = {k: v for k, v in player.items() if k not in excluded}
     result['inventoryCount'] = len(player.get('inventory') or [])
     weapon = (player.get('loadout') or {}).get('weapon')
@@ -577,6 +609,16 @@ def public_player(player):
     result['dashCooldown'] = max(0.0, float(player.get('dashReadyAt') or 0) - now)
     result['dashActive'] = bool(player.get('dashActive'))
     result['combatStyle'] = effective_style(player)
+    emote_until = float(player.get('emoteUntil') or 0)
+    if player.get('emote') and now < emote_until:
+        result['emote'] = player['emote']
+        result['emoteRemainingMs'] = max(0, int((emote_until - now) * 1000))
+        result['emoteDurationMs'] = int(EMOTE_DURATIONS.get(player['emote'], 4.0) * 1000)
+    else:
+        result['emote'] = ''
+        result['emoteRemainingMs'] = 0
+        result['emoteDurationMs'] = 0
+    result['emoteSerial'] = int(player.get('emoteSerial') or 0)
     return result
 
 def connected(room, space=None):
@@ -1660,6 +1702,8 @@ def simulate(room, dt, now):
         combo_locked = bool(player.get('comboOwner'))
         combo_attacking = bool(player.get('comboTarget'))
         can_act = not player['knockedOut'] and not stunned and not combo_locked and not in_parry_recovery
+        if player.get('emote') and (now >= float(player.get('emoteUntil') or 0) or length > .08 or player['knockedOut'] or stunned or combo_locked or combo_attacking or player.get('dashActive') or player.get('parrying')):
+            cancel_emote(player)
 
         if player.get('dashActive'):
             desired_angle = player.get('dashAngle', player.get('direction', 0))
@@ -1842,13 +1886,43 @@ async def ws_handler(request):
                 player['input'] = sanitize_input(message)
                 player['lastInputAt'] = time.monotonic()
             elif message_type in ('attack', 'punch'):
+                cancel_emote(player)
                 await start_attack(room, player, False)
             elif message_type == 'parry':
+                cancel_emote(player)
                 await parry(room, player)
             elif message_type == 'dash':
+                cancel_emote(player)
                 await dash(room, player, message.get('x'), message.get('y'))
             elif message_type == 'interact':
                 pass
+            elif message_type == 'emote':
+                emote = clean_emote(message.get('emote'))
+                now = time.monotonic()
+                if not emote:
+                    await send(ws, {'type':'emote-error','message':'Unknown emote. Try /e dance, wave, cheer, laugh, point, or sit.'})
+                    continue
+                if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or player.get('comboOwner') or player.get('comboTarget') or player.get('dashActive'):
+                    await send(ws, {'type':'emote-error','message':'You cannot use an emote right now.'})
+                    continue
+                if now - float(player.get('lastEmoteAt') or 0) < EMOTE_COOLDOWN:
+                    continue
+                player['lastEmoteAt'] = now
+                player['emote'] = emote
+                player['emoteUntil'] = now + EMOTE_DURATIONS[emote]
+                player['emoteSerial'] = int(player.get('emoteSerial') or 0) + 1
+                player['input'] = sanitize_input({})
+                player['moving'] = player['sprinting'] = False
+                player['moveVx'] = player['moveVy'] = 0
+                event = {
+                    'type': 'emote',
+                    'id': player['id'],
+                    'emote': emote,
+                    'emoteSerial': player['emoteSerial'],
+                    'durationMs': int(EMOTE_DURATIONS[emote] * 1000),
+                }
+                await broadcast(room, event, space=player.get('space','world'))
+                await send(ws, {'type':'emote-started','emote':emote})
             elif message_type == 'chat':
                 text = clean_chat_text(message.get('text'))
                 now = time.monotonic()
@@ -1953,11 +2027,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v30',
+        'service': 'green-floor-v31',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'manual-click-combos-distinct-procedural-attacks-v30',
+        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'manual-click-combos-distinct-procedural-attacks-v31',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
