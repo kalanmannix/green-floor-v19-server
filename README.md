@@ -1,14 +1,9 @@
-# Green Floor V26 — Render server
+# Green Floor V29 — Render server
 
-Upload these files to the root of the GitHub repository linked to Render.
+Build command: `pip install -r requirements.txt`
 
-Render settings:
+Start command: `python server.py`
 
-- Build command: `pip install -r requirements.txt`
-- Start command: `python server.py`
-- Health check path: `/health`
-- Instance type: Free
+Health path: `/health`
 
-After deployment, `/health` must report `"build": 26`.
-
-V26 provides authoritative multiplayer physics combat, automatic fighting-style combos, directional parries, steerable dash attacks, collision for the expanded map, progression, rooms, voice relay, boombox relay, and administration.
+V29 keeps the authoritative V28 multiplayer combat rules while the client uses continuous procedural spring animation and target-aware posing. After deployment, `/health` must report `"build": 29`.

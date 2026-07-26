@@ -10,11 +10,12 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 26
+BUILD = 29
 PROTOCOL = 26
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
+DUMMY_X, DUMMY_Y, DUMMY_RADIUS = 2050, 1120, 36
 SPAWN_X = 1700
 SPAWN_Y = 930
 RADIUS = 30
@@ -29,9 +30,9 @@ PARRY_ACTIVE = 0.22
 PARRY_RECOVERY = 0.48
 PARRY_COOLDOWN = 1.50
 PARRY_STUN = 0.72
-DASH_DURATION = 0.76
-DASH_COOLDOWN = 1.70
-DASH_SPEED = 510
+DASH_DURATION = 0.52
+DASH_COOLDOWN = 1.45
+DASH_SPEED = 690
 DASH_TURN_RATE = 4.25
 COMBO_RELEASE_PROTECTION = 0.34
 KO_TIME = 3.0
@@ -882,8 +883,39 @@ def respawn(player):
     player['comboToken'] = int(player.get('comboToken') or 0) + 1
 
 
-async def training_hit(room, attacker):
-    return False
+async def training_hit(room, attacker, dash_attack=False):
+    if attacker.get('space','world') != 'world':
+        return False
+    style_name = effective_style(attacker)
+    style = STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler'])
+    distance = math.hypot(DUMMY_X - attacker['x'], DUMMY_Y - attacker['y'])
+    reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
+    if distance > (PUNCH_RANGE + (34 if dash_attack else 0)) * reach_mult:
+        return False
+    angle = math.atan2(DUMMY_Y - attacker['y'], DUMMY_X - attacker['x'])
+    attacker['attackAngle'] = angle
+    attacker['direction'] = angle
+    attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
+    token = int(attacker.get('comboToken') or 0) + 1
+    attacker['comboToken'] = token
+    for step, kind in enumerate(style['kinds']):
+        if step > 0:
+            await asyncio.sleep(style['delays'][step])
+        if int(attacker.get('comboToken') or 0) != token or attacker.get('knockedOut'):
+            return True
+        attacker['attackHand'] = 'left' if step % 2 else 'right'
+        attacker['attackKind'] = kind
+        attacker['comboStep'] = step
+        move_with_collisions(attacker, math.cos(angle) * 20, math.sin(angle) * 20)
+        await broadcast(room, {'type':'combat','event':{
+            'kind':'training-hit','attackerId':attacker['id'],'targetId':'training-dummy','angle':angle,
+            'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
+            'hit':True,'damage':0,'knockedOut':False,'finisher':step == len(style['kinds'])-1,
+            'dashAttack':dash_attack and step == 0,'durationMs':round(max(.18, style['delays'][min(step+1,len(style['delays'])-1)])*1000),
+            'style':style_name,'x':DUMMY_X,'y':DUMMY_Y-58
+        }}, space='world')
+    attacker['attackRecoveryUntil'] = time.monotonic() + float(style.get('recovery') or .3)
+    return True
 
 def angle_difference(a, b):
     return (a - b + math.pi) % math.tau - math.pi
@@ -927,7 +959,7 @@ async def parry(room, player):
     player['moveVx'] *= 0.25
     player['moveVy'] *= 0.25
     await broadcast(room, {'type':'combat','event':{
-        'kind':'parry-start','attackerId':player['id'],'targetId':None,'angle':player.get('direction',0),
+        'kind':'parry-start','attackerId':player['id'],'targetId':None,'angle':player.get('direction',0),'visualMs':520,
         'hit':False,'parried':False,'durationMs':round(PARRY_ACTIVE*1000),'x':player['x'],'y':player['y']-50
     }}, space=player.get('space','world'))
 
@@ -1016,6 +1048,8 @@ async def start_attack(room, attacker, dash_attack=False):
 
     opening_reach = (PUNCH_RANGE + (24 if dash_attack else 0)) * reach_mult
     if not target or distance > opening_reach:
+        if await training_hit(room, attacker, dash_attack):
+            return
         attacker['attackRecoveryUntil'] = now + (0.58 if dash_attack else 0.34)
         await broadcast(room, {'type':'combat','event':{
             'kind':'dash-whiff' if dash_attack else 'attack-whiff','attackerId':attacker['id'],
@@ -1774,11 +1808,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v26',
+        'service': 'green-floor-v29',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-physics-combos-parry-dash-minimap-large-map',
+        'voice': 'mulaw-websocket-relay+boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-procedural-physics-animation-v29',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
