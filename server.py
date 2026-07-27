@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 36
-PROTOCOL = 31
+BUILD = 38
+PROTOCOL = 33
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
@@ -45,6 +45,9 @@ COUNTER_DAMAGE_MULT = 1.25
 COUNTER_STUN_BONUS = 0.10
 DASH_INVULNERABILITY = 0.18
 KO_TIME = 3.0
+RAGDOLL_MIN_DURATION = 0.70
+RAGDOLL_MAX_STRENGTH = 1.55
+RAGDOLL_EVENT_VERSION = 1
 RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
 PHYSICS_GRAB_RANGE = 132
@@ -79,9 +82,9 @@ LOW_GRAVITY_INTERVAL_MAX = 340.0
 CARRY_RANGE = 118
 CART_MOUNT_RANGE = 122
 CART_CRASH_SPEED = 360
-TABLE_X, TABLE_Y, TABLE_W, TABLE_H = 2460, 1035, 190, 92
+TABLE_X, TABLE_Y, TABLE_W, TABLE_H = 1700, 1800, 190, 92
 TABLE_RESPAWN = 12.0
-HOOP_X, HOOP_Y = 2710, 900
+HOOP_X, HOOP_Y = 2120, 1000
 OBJECT_TYPES = {
     'cone': {'radius': 21, 'mass': 0.45, 'bounce': 0.54, 'friction': 2.25, 'throw': 1.14, 'kick': 1.18, 'downSpeed': 690, 'stunSpeed': 360, 'label': 'traffic cone'},
     'chair': {'radius': 32, 'mass': 1.15, 'bounce': 0.34, 'friction': 2.80, 'throw': 0.86, 'kick': 0.86, 'downSpeed': 430, 'stunSpeed': 260, 'label': 'folding chair'},
@@ -92,18 +95,19 @@ OBJECT_TYPES = {
     'cart': {'radius': 48, 'mass': 2.5, 'bounce': 0.20, 'friction': 2.20, 'throw': 0.0, 'kick': 0.42, 'downSpeed': 390, 'stunSpeed': 250, 'label': 'shopping cart'},
 }
 PHYSICS_SPAWNS = [
-    ('cone-1','cone',1885,850), ('cone-2','cone',1945,910),
-    ('chair-1','chair',2070,850), ('chair-2','chair',2140,930),
-    ('trashcan-1','trashcan',2255,855),
-    ('basketball-1','basketball',2380,865), ('basketball-2','basketball',2440,950),
-    ('cart-1','cart',2590,870),
+    # Spread across verified open courtyard lanes; none intersect building collision boxes.
+    ('cone-1','cone',790,900), ('cone-2','cone',2500,900),
+    ('chair-1','chair',1200,900), ('chair-2','chair',2250,1800),
+    ('trashcan-1','trashcan',1450,900),
+    ('basketball-1','basketball',2030,930), ('basketball-2','basketball',1940,1085),
+    ('cart-1','cart',1000,1800),
 ]
 VOICE_CODEC_VERSION = 2
 VOICE_CLIENT_FRAME = 333
 VOICE_SERVER_FRAME = 349
 VOICE_MAX_FRAME = 420
 VOICE_MIN_INTERVAL = 0.012
-AUDIO_QUEUE_MAX = 18
+AUDIO_QUEUE_MAX = 28
 WS_HEARTBEAT = 15
 CHAT_MAX_LENGTH = 140
 CHAT_COOLDOWN = 0.75
@@ -571,6 +575,7 @@ def make_physics_object(object_id, kind, x, y):
         'lastThrower': None, 'ownerImmuneUntil': 0.0, 'lastHitAt': {},
         'fuseEnd': 0.0, 'fieldEnd': 0.0, 'createdAt': time.monotonic(), 'lastActiveAt': time.monotonic(),
         'scoredAt': 0.0, 'riderId': None, 'lastCollisionAt': 0.0,
+        'heading': 0.0,
     }
 
 
@@ -640,6 +645,43 @@ def object_spec(obj):
     return OBJECT_TYPES.get(str(obj.get('type') or ''), OBJECT_TYPES['cone'])
 
 
+def trigger_ragdoll(room, target, duration, source_x=None, source_y=None, force=0.0, knockout=False):
+    """Create one authoritative ragdoll impulse shared by every client."""
+    now = time.monotonic()
+    tx = float(target.get('x') or 0)
+    ty = float(target.get('y') or 0)
+    if source_x is None or source_y is None or math.hypot(tx-float(source_x), ty-float(source_y)) < 1.0:
+        away = float(target.get('direction') or 0) + math.pi
+    else:
+        away = math.atan2(ty-float(source_y), tx-float(source_x))
+    serial = int(target.get('ragdollSerial') or 0) + 1
+    strength = clamp(.32 + float(force or 0) / 620.0, .32, RAGDOLL_MAX_STRENGTH)
+    # Values are generated once on the server so all clients see the same fall.
+    spin = random.uniform(-1.0, 1.0)
+    if abs(spin) < .24:
+        spin = .24 if spin >= 0 else -.24
+    target['ragdollSerial'] = serial
+    target['ragdollStartedAt'] = now
+    target['ragdollDuration'] = max(RAGDOLL_MIN_DURATION, float(duration or RAGDOLL_MIN_DURATION))
+    target['ragdollAngle'] = away
+    target['ragdollStrength'] = strength
+    target['ragdollSpin'] = spin
+    target['ragdollSeed'] = random.random()
+    target['ragdollKnockout'] = bool(knockout)
+    payload = {
+        'type':'ragdoll', 'version':RAGDOLL_EVENT_VERSION,
+        'playerId':target.get('id'), 'serial':serial,
+        'angle':round(away,4), 'strength':round(strength,3),
+        'spin':round(spin,3), 'seed':round(float(target['ragdollSeed']),4),
+        'durationMs':int(target['ragdollDuration']*1000), 'knockout':bool(knockout),
+    }
+    try:
+        asyncio.get_running_loop().create_task(broadcast(room, payload, space=target.get('space','world')))
+    except RuntimeError:
+        pass
+    return payload
+
+
 def release_held_object(room, player, place=True):
     object_id = player.get('heldObjectId')
     player['heldObjectId'] = None
@@ -692,6 +734,7 @@ def knock_player_down(room, target, duration, source_x, source_y, force=0.0):
         angle = math.atan2(target['y'] - source_y, target['x'] - source_x)
         target['impulseX'] += math.cos(angle) * force
         target['impulseY'] += math.sin(angle) * force
+    trigger_ragdoll(room, target, duration, source_x, source_y, force=force, knockout=False)
     return True
 
 
@@ -779,6 +822,7 @@ async def physics_interact(room, player):
         nearest_downed['downedUntil'] = 0.0
         nearest_downed['downedImmunityUntil'] = now + 0.8
         nearest_downed['stunnedUntil'] = min(float(nearest_downed.get('stunnedUntil') or 0), now)
+        nearest_downed['ragdollDuration'] = max(float(nearest_downed.get('ragdollDuration') or 0), .55)
         await broadcast(room, {'type':'physics-event','event':{'kind':'help-up','helperId':player['id'],'targetId':nearest_downed['id'],'x':nearest_downed['x'],'y':nearest_downed['y']-45}}, space=player.get('space','world'))
         return
     obj, distance = nearest_free_object(room, player)
@@ -1137,6 +1181,7 @@ def simulate_physics(room, dt, now):
             obj['x'] = holder['x'] + math.cos(angle) * hold_distance
             obj['y'] = holder['y'] + math.sin(angle) * hold_distance
             obj['angle'] = angle if obj.get('type') == 'cart' else angle + math.pi * .5
+            if obj.get('type') == 'cart': obj['heading'] = angle
             obj['vx'] = obj['vy'] = obj['angularVelocity'] = 0.0
             continue
         spec = object_spec(obj)
@@ -1213,8 +1258,21 @@ def simulate_physics(room, dt, now):
         linear_decay = math.exp(-friction * dt)
         obj['vx'] *= linear_decay
         obj['vy'] *= linear_decay
-        obj['angularVelocity'] *= math.exp(-2.6 * dt)
-        obj['angle'] = (float(obj.get('angle') or 0) + float(obj.get('angularVelocity') or 0) * dt) % math.tau
+        if obj.get('type') == 'cart':
+            # The cart is a top-down vehicle: keep its nose aligned with travel and never tumble end-over-end.
+            if speed > 18:
+                desired = math.atan2(float(obj.get('vy') or 0), float(obj.get('vx') or 0))
+                current = float(obj.get('heading') or obj.get('angle') or desired)
+                delta = math.atan2(math.sin(desired-current), math.cos(desired-current))
+                current += delta * min(1.0, dt * 9.0)
+                obj['heading'] = current
+                obj['angle'] = current % math.tau
+            else:
+                obj['angle'] = float(obj.get('heading') or obj.get('angle') or 0) % math.tau
+            obj['angularVelocity'] = 0.0
+        else:
+            obj['angularVelocity'] = clamp(float(obj.get('angularVelocity') or 0), -7.0, 7.0) * math.exp(-3.4 * dt)
+            obj['angle'] = (float(obj.get('angle') or 0) + float(obj.get('angularVelocity') or 0) * dt) % math.tau
         if abs(obj['vx']) < 2.5: obj['vx'] = 0.0
         if abs(obj['vy']) < 2.5: obj['vy'] = 0.0
         # Reset abandoned props so the playground cannot be emptied permanently.
@@ -1281,7 +1339,9 @@ def simulate_physics(room, dt, now):
                 impulse=-(1+restitution)*relative/(1/max(.1,sa['mass'])+1/max(.1,sb['mass']))
                 a['vx']-=impulse*nx/max(.1,sa['mass']); a['vy']-=impulse*ny/max(.1,sa['mass'])
                 b['vx']+=impulse*nx/max(.1,sb['mass']); b['vy']+=impulse*ny/max(.1,sb['mass'])
-                a['angularVelocity']+=random.uniform(-2.5,2.5); b['angularVelocity']+=random.uniform(-2.5,2.5)
+                
+                if a.get('type') != 'cart': a['angularVelocity'] += random.uniform(-1.6,1.6)
+                if b.get('type') != 'cart': b['angularVelocity'] += random.uniform(-1.6,1.6)
     for obj in objects.values():
         if obj.get('type')=='cart' and obj.get('riderId'):
             rider=room.get('players',{}).get(obj.get('riderId'))
@@ -1308,6 +1368,7 @@ def make_room(code):
         'loadouts': {},
         'boomboxes': {},
         'physicsObjects': create_world_objects(),
+        'snapshotSerial': 0,
         'physicsTable': {'brokenUntil': 0.0, 'serial': 0},
         'physicsSerial': 0,
         'airstrike': None, 'airstrikeSerial': 0, 'airstrikeReadyAt': 0.0,
@@ -1331,6 +1392,9 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'stamina': STAMINA_MAX, 'lastStaminaUseAt': 0,
         'score': 0, 'knockedOut': False, 'respawnAt': 0,
         'downedUntil': 0.0, 'downedImmunityUntil': 0.0,
+        'ragdollSerial': 0, 'ragdollStartedAt': 0.0, 'ragdollDuration': 0.0,
+        'ragdollAngle': 0.0, 'ragdollStrength': 0.0, 'ragdollSpin': 0.0,
+        'ragdollSeed': random.random(), 'ragdollKnockout': False,
         'heldObjectId': None, 'throwChargeStartedAt': 0.0, 'kickReadyAt': 0.0,
         'grenadeCount': 1, 'gravityGrenadeCount': 0, 'airstrikeCount': 0, 'grenadeReadyAt': 0.0,
         'ridingCartId': None, 'carriedTargetId': None, 'carriedBy': None,
@@ -1351,7 +1415,7 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
         'lastVoiceAt': 0.0, 'lastBoomAt': 0.0, 'lastChatAt': 0.0, 'lastEmoteAt': 0.0,
-        'audioQueue': None, 'audioTask': None,
+        'audioQueue': None, 'audioTask': None, 'voiceWs': None,
         'emote': '', 'emoteUntil': 0.0, 'emoteSerial': 0,
         'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
@@ -1419,19 +1483,71 @@ def cancel_combo(room, attacker, release_target=True):
             target['invulnerableUntil'] = max(float(target.get('invulnerableUntil') or 0), time.monotonic() + COMBO_RELEASE_PROTECTION)
 
 
-def public_player(player):
-    excluded = {'ws', 'input', 'sessionToken', 'remove_task', 'connected', 'inventory', 'loadout', 'roomArt', 'lastVoiceAt', 'lastBoomAt', 'lastChatAt', 'lastEmoteAt', 'audioQueue', 'audioTask', 'lastInputAt', 'isAdmin', 'characterSecret', 'roomRef', 'nextPassiveCoinAt', 'emoteUntil'}
-    result = {k: v for k, v in player.items() if k not in excluded}
+def public_player(player, detailed=False):
+    """Return a compact 30 Hz gameplay state.
+
+    Only the receiving player's packet carries progression/menu data. Remote
+    players receive the fields needed for movement, animation, combat, voice
+    positioning, and world interactions. This keeps snapshots small enough to
+    remain smooth when the server is busy.
+    """
+    now = time.monotonic()
+    result = {
+        'id': player.get('id'),
+        'characterId': player.get('characterId'),
+        'name': player.get('name','Player'),
+        'x': round(float(player.get('x') or 0), 2),
+        'y': round(float(player.get('y') or 0), 2),
+        'vx': round(float(player.get('vx') or 0), 2),
+        'vy': round(float(player.get('vy') or 0), 2),
+        'direction': round(float(player.get('direction') or 0), 4),
+        'facing': 1 if int(player.get('facing') or 1) >= 0 else -1,
+        'moving': bool(player.get('moving')),
+        'sprinting': bool(player.get('sprinting')),
+        'stamina': round(float(player.get('stamina') or 0), 1),
+        'score': int(player.get('score') or 0),
+        'knockedOut': bool(player.get('knockedOut')),
+        'health': round(float(player.get('health') or 0), 1),
+        'maxHealth': round(float(player.get('maxHealth') or 100), 1),
+        'style': player.get('style','Street Brawler'),
+        'heritage': player.get('heritage','Japanese'),
+        'reachMult': round(float(player.get('reachMult') or 1), 3),
+        'grabRangeMult': round(float(player.get('grabRangeMult') or 1), 3),
+        'attackSpeedMult': round(float(player.get('attackSpeedMult') or 1), 3),
+        'sizeScale': round(float(player.get('sizeScale') or 1), 3),
+        'weaponDamageMult': round(float(player.get('weaponDamageMult') or 1), 3),
+        'weaponReachMult': round(float(player.get('weaponReachMult') or 1), 3),
+        'space': player.get('space','world'),
+        'title': player.get('title','New Student'),
+        'selectedTitle': player.get('selectedTitle') or player.get('title','New Student'),
+        'nameplateTheme': player.get('nameplateTheme','classic'),
+        'accentColor': player.get('accentColor','#b9f6c8'),
+        'attackHand': 'left' if player.get('attackHand') == 'left' else 'right',
+        'attackAngle': round(float(player.get('attackAngle') or 0), 4),
+        'attackKind': player.get('attackKind','jab'),
+        'comboStep': int(player.get('comboStep') or 0),
+        'comboLength': max(1, int(player.get('comboLength') or 1)),
+        'attackActionSerial': int(player.get('attackActionSerial') or 0),
+    }
     result['inventoryCount'] = len(player.get('inventory') or [])
     weapon = (player.get('loadout') or {}).get('weapon')
     result['weaponLevel'] = int(weapon.get('level') or 0) if weapon else 0
     result['weaponMasteryRank'] = int(weapon.get('masteryRank') or 0) if weapon else 0
-    now = time.monotonic()
     result['parrying'] = now < float(player.get('parryUntil') or 0)
     result['stunned'] = now < float(player.get('stunnedUntil') or 0)
     result['comboLocked'] = bool(player.get('comboOwner')) and now < float(player.get('stunnedUntil') or 0)
     result['downed'] = now < float(player.get('downedUntil') or 0)
     result['downedRemainingMs'] = max(0, int((float(player.get('downedUntil') or 0) - now) * 1000))
+    ragdoll_started = float(player.get('ragdollStartedAt') or 0)
+    ragdoll_duration = max(0.0, float(player.get('ragdollDuration') or 0))
+    result['ragdollElapsedMs'] = max(0, int((now-ragdoll_started)*1000)) if ragdoll_started else 0
+    result['ragdollDurationMs'] = int(ragdoll_duration*1000)
+    result['ragdollAngle'] = round(float(player.get('ragdollAngle') or 0), 4)
+    result['ragdollStrength'] = round(float(player.get('ragdollStrength') or 0), 3)
+    result['ragdollSpin'] = round(float(player.get('ragdollSpin') or 0), 3)
+    result['ragdollSeed'] = round(float(player.get('ragdollSeed') or 0), 4)
+    result['ragdollSerial'] = int(player.get('ragdollSerial') or 0)
+    result['ragdollKnockout'] = bool(player.get('ragdollKnockout'))
     result['heldObjectId'] = player.get('heldObjectId')
     result['grenadeCount'] = int(player.get('grenadeCount') or 0)
     result['gravityGrenadeCount'] = int(player.get('gravityGrenadeCount') or 0)
@@ -1444,8 +1560,8 @@ def public_player(player):
     result['attackQueued'] = bool(player.get('attackQueued'))
     result['chainLocked'] = bool(player.get('chainLocked'))
     result['vulnerable'] = now < float(player.get('vulnerableUntil') or 0)
-    result['parryCooldown'] = max(0.0, float(player.get('parryReadyAt') or 0) - now)
-    result['dashCooldown'] = max(0.0, float(player.get('dashReadyAt') or 0) - now)
+    result['parryCooldown'] = round(max(0.0, float(player.get('parryReadyAt') or 0) - now), 3)
+    result['dashCooldown'] = round(max(0.0, float(player.get('dashReadyAt') or 0) - now), 3)
     result['dashActive'] = bool(player.get('dashActive'))
     result['combatStyle'] = effective_style(player)
     emote_until = float(player.get('emoteUntil') or 0)
@@ -1458,6 +1574,11 @@ def public_player(player):
         result['emoteRemainingMs'] = 0
         result['emoteDurationMs'] = 0
     result['emoteSerial'] = int(player.get('emoteSerial') or 0)
+    if detailed:
+        for key in ('xp','coins','reputation','level','levelXp','levelXpNeeded','skillPoints',
+                    'attributes','missionStats','missionClaimed','job','loginStreak',
+                    'bestLoginStreak','records','unlockedTitles'):
+            result[key] = player.get(key)
     return result
 
 def clean_track_name(value):
@@ -1557,16 +1678,16 @@ async def locked_send_bytes(ws, data):
 
 async def audio_sender(player):
     try:
-        while player.get('connected') and player.get('ws') and not player['ws'].closed:
+        while player.get('connected'):
             queue = player.get('audioQueue')
             if queue is None:
                 return
             packet = await queue.get()
-            ws = player.get('ws')
+            ws = player.get('voiceWs')
             if not ws or ws.closed:
-                return
+                continue
             try:
-                await asyncio.wait_for(locked_send_bytes(ws, packet), timeout=0.12)
+                await asyncio.wait_for(locked_send_bytes(ws, packet), timeout=0.08)
             except (asyncio.TimeoutError, ConnectionError):
                 continue
             except asyncio.CancelledError:
@@ -1642,12 +1763,17 @@ async def snapshot(room):
         {'id': p['id'], 'characterId': p.get('characterId'), 'name': p['name'], 'space': p.get('space','world'), 'title': p.get('title','New Student'), 'level': p.get('level',1)}
         for p in connected(room)
     ]
+    server_time = int(time.time() * 1000)
+    room['snapshotSerial'] = int(room.get('snapshotSerial') or 0) + 1
+    serial = room['snapshotSerial']
+    tasks = []
     for receiver in connected(room):
         same_space = connected(room, receiver.get('space','world'))
-        await send(receiver['ws'], {
+        packet = {
             'type': 'snapshot',
-            'players': {p['id']: public_player(p) for p in same_space},
-            'serverTime': int(time.time() * 1000),
+            'players': {p['id']: public_player(p, detailed=(p['id'] == receiver['id'])) for p in same_space},
+            'serverTime': server_time,
+            'snapshotSerial': serial,
             'online': all_online,
             'space': receiver.get('space','world'),
             'boomboxes': {
@@ -1658,7 +1784,10 @@ async def snapshot(room):
             'table': public_table(room),
             'hoop': {'x': HOOP_X, 'y': HOOP_Y},
             'chaos': public_chaos_state(room),
-        })
+        }
+        tasks.append(send(receiver['ws'], packet))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 async def send_world(room, ws=None):
     async def room_data(owner_id):
@@ -1955,6 +2084,10 @@ def knockout(room, target, attacker):
     release_held_object(room, target, place=True)
     target['downedUntil'] = 0.0
     target['knockedOut'] = True
+    source_x = float(attacker.get('x') or target.get('x') or 0)
+    source_y = float(attacker.get('y') or target.get('y') or 0)
+    impact_force = max(260.0, math.hypot(float(target.get('impulseX') or 0), float(target.get('impulseY') or 0)))
+    trigger_ragdoll(room, target, KO_TIME, source_x, source_y, force=impact_force, knockout=True)
     target['respawnAt'] = time.monotonic() + KO_TIME
     target['blocking'] = target['sprinting'] = target['parrying'] = False
     target['dashActive'] = False
@@ -1996,6 +2129,10 @@ def respawn(player):
     player['knockedOut'] = False
     player['downedUntil'] = 0.0
     player['downedImmunityUntil'] = time.monotonic() + 0.75
+    player['ragdollStartedAt'] = 0.0
+    player['ragdollDuration'] = 0.0
+    player['ragdollStrength'] = 0.0
+    player['ragdollKnockout'] = False
     player['heldObjectId'] = None
     player['throwChargeStartedAt'] = 0.0
     player['respawnAt'] = 0
@@ -3008,32 +3145,7 @@ async def ws_handler(request):
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                if not state:
-                    continue
-                room, player = state
-                data = bytes(msg.data)
-                now = time.monotonic()
-                # A = microphone voice, B = boombox music. V2 is 32 kHz IMA ADPCM.
-                if len(data) != VOICE_CLIENT_FRAME or data[1] != VOICE_CODEC_VERSION or data[:1] not in (b'A', b'B'):
-                    continue
-                is_boombox = data[:1] == b'B'
-                if is_boombox:
-                    boom = public_boombox(room, player['id'])
-                    if not boom or not boom.get('active'):
-                        continue
-                    source_space = boom.get('space', player.get('space', 'world'))
-                    clock_key = 'lastBoomAt'
-                else:
-                    source_space = player.get('space', 'world')
-                    clock_key = 'lastVoiceAt'
-                if now - float(player.get(clock_key) or 0) < VOICE_MIN_INTERVAL:
-                    continue
-                player[clock_key] = now
-                packet = data[:2] + player['id'].encode('ascii') + data[2:]
-                for other in connected(room, source_space):
-                    if other['ws'] is ws or other['ws'].closed:
-                        continue
-                    enqueue_audio(other, packet)
+                # V38 uses /voice so gameplay snapshots cannot block audio packets.
                 continue
             if msg.type != WSMsgType.TEXT:
                 continue
@@ -3075,7 +3187,7 @@ async def ws_handler(request):
                 if existing and player is existing:
                     if player.get('remove_task'): player['remove_task'].cancel(); player['remove_task']=None
                 room['players'][character_id] = player; room['sessions'][player['sessionToken']] = character_id
-                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['isAdmin']=False; start_audio_sender(player)
+                player['connected']=True; player['ws']=ws; player['input']=sanitize_input(message.get('input') or {}); player['lastInputAt']=time.monotonic(); player['isAdmin']=False
                 avatar = sanitize_avatar(source.get('avatar') or message.get('avatar'))
                 if avatar: room['avatars'][character_id]=avatar
                 room['loadouts'][character_id]=player.get('loadout') or {}
@@ -3209,6 +3321,11 @@ async def ws_handler(request):
             if player.get('ws') is ws:
                 player['connected'] = False
                 stop_audio_sender(player)
+                voice_ws = player.get('voiceWs')
+                player['voiceWs'] = None
+                if voice_ws and not voice_ws.closed:
+                    try: await voice_ws.close(code=1001, message=b'game disconnected')
+                    except Exception: pass
                 player['ws'] = None
                 if player['id'] in room.get('boomboxes', {}):
                     room['boomboxes'].pop(player['id'], None)
@@ -3220,6 +3337,78 @@ async def ws_handler(request):
                 save_character(player)
                 await snapshot(room)
                 player['remove_task'] = asyncio.create_task(remove_later(room, player))
+    return ws
+
+
+async def voice_ws_handler(request):
+    ws = web.WebSocketResponse(max_msg_size=2_000_000, heartbeat=10, autoping=True, compress=False)
+    await ws.prepare(request)
+    player = None
+    room = None
+    try:
+        first = await asyncio.wait_for(ws.receive(), timeout=8.0)
+        if first.type != WSMsgType.TEXT:
+            await ws.close(code=4001, message=b'voice join required')
+            return ws
+        try:
+            hello = json.loads(first.data)
+        except Exception:
+            hello = {}
+        if hello.get('type') != 'voice-join' or int(hello.get('build') or 0) != BUILD or int(hello.get('protocol') or 0) != PROTOCOL:
+            await ws.close(code=4002, message=b'voice version mismatch')
+            return ws
+        session = token(hello.get('sessionToken'))
+        for candidate_room in rooms.values():
+            player_id = candidate_room.get('sessions', {}).get(session)
+            candidate = candidate_room.get('players', {}).get(player_id) if player_id else None
+            if candidate and candidate.get('connected'):
+                room, player = candidate_room, candidate
+                break
+        if not player or not room:
+            await ws.close(code=4003, message=b'unknown voice session')
+            return ws
+        old = player.get('voiceWs')
+        if old and old is not ws and not old.closed:
+            try: await old.close(code=4004, message=b'replaced')
+            except Exception: pass
+        player['voiceWs'] = ws
+        start_audio_sender(player)
+        await send(ws, {'type':'voice-ready','id':player['id'],'codec':'32khz-ima-adpcm','channel':'dedicated'})
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                data = bytes(msg.data)
+                now = time.monotonic()
+                if len(data) != VOICE_CLIENT_FRAME or data[1] != VOICE_CODEC_VERSION or data[:1] not in (b'A', b'B'):
+                    continue
+                is_boombox = data[:1] == b'B'
+                if is_boombox:
+                    boom = public_boombox(room, player['id'])
+                    if not boom or not boom.get('active'):
+                        continue
+                    source_space = boom.get('space', player.get('space','world'))
+                    clock_key = 'lastBoomAt'
+                else:
+                    source_space = player.get('space','world')
+                    clock_key = 'lastVoiceAt'
+                if now - float(player.get(clock_key) or 0) < VOICE_MIN_INTERVAL:
+                    continue
+                player[clock_key] = now
+                packet = data[:2] + player['id'].encode('ascii') + data[2:]
+                for other in connected(room, source_space):
+                    if other is player or not other.get('voiceWs') or other['voiceWs'].closed:
+                        continue
+                    enqueue_audio(other, packet)
+            elif msg.type == WSMsgType.TEXT:
+                try: message = json.loads(msg.data)
+                except Exception: continue
+                if message.get('type') == 'voice-ping':
+                    await send(ws, {'type':'voice-pong','now':int(time.time()*1000)})
+    except (asyncio.TimeoutError, ConnectionError):
+        pass
+    finally:
+        if player and player.get('voiceWs') is ws:
+            player['voiceWs'] = None
+            stop_audio_sender(player)
     return ws
 
 
@@ -3254,11 +3443,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v36-pro',
+        'service': 'green-floor-v38-stability-pro',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': '32khz-ima-adpcm-pro-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'controlled-chaos-airstrike-gravity-cart-v36',
+        'voice': 'dedicated-32khz-ima-adpcm-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-stability-ui-object-overhaul-v38',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
@@ -3279,6 +3468,7 @@ app = web.Application(client_max_size=12_000_000)
 app.router.add_get('/', health)
 app.router.add_get('/health', health)
 app.router.add_get('/ws', ws_handler)
+app.router.add_get('/voice', voice_ws_handler)
 app.on_startup.append(startup)
 app.on_cleanup.append(cleanup)
 

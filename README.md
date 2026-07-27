@@ -1,5 +1,7 @@
-# Green Floor V36 — Render Pro server
+# Green Floor V38 — Render Pro stability server
 
-Deploy this folder to the existing Render Pro web service. The service uses `render.yaml`, installs `aiohttp`, and starts with `python server.py`. Confirm `/health` reports `"build": 36` before deploying the matching Netlify client.
+Deploy this folder as a Render Python web service using the included `render.yaml`. Confirm the health endpoint reports `"build": 38` before deploying the matching Netlify client.
 
-V36 runs server-authoritative Controlled Chaos systems: warned multi-impact airstrikes, gravity pull-and-release grenades, a pushable and rideable shopping cart, carrying downed players, object-to-object collisions, timed low-gravity events, and the complete polished V35 Physics Playground. Movement penalties, ownership cleanup, knockdown immunity, object resets, protected spawn targeting, cart crash handling, and client/server version guards are included. Existing combat, 32 kHz relayed voice, chat, emotes, personal rooms, progression, and positional boombox behavior remain included.
+V38 separates 32 kHz voice relay traffic onto the `/voice` WebSocket while `/ws` handles gameplay. Voice sessions authenticate with the active game-session token and have independent heartbeat, reconnect, buffering, and send queues. Gameplay snapshots are sent concurrently so one slow connection does not hold up other players.
+
+Physics props now spawn across the courtyard rather than in one cluster. Shopping-cart heading is server-stabilized and follows planar movement without tumbling. Loose-object spin is capped, and existing combat, chat, emotes, rooms, ragdolls, grenades, airstrikes, low gravity, carrying, progression, and boombox systems remain included.
