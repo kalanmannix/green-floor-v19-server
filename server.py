@@ -8,10 +8,11 @@ import secrets
 import sqlite3
 import string
 import time
+from collections import deque
 from aiohttp import web, WSMsgType
 
-BUILD = 39
-PROTOCOL = 34
+BUILD = 41
+PROTOCOL = 36
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
@@ -102,12 +103,19 @@ PHYSICS_SPAWNS = [
     ('basketball-1','basketball',2030,930), ('basketball-2','basketball',1940,1085),
     ('cart-1','cart',1000,1800),
 ]
-VOICE_CODEC_VERSION = 2
-VOICE_CLIENT_FRAME = 333
-VOICE_SERVER_FRAME = 349
-VOICE_MAX_FRAME = 420
-VOICE_MIN_INTERVAL = 0.012
-AUDIO_QUEUE_MAX = 28
+VOICE_CODEC_VERSION = 3
+VOICE_CLIENT_FRAME = 973
+VOICE_SERVER_FRAME = 989
+BOOM_CODEC_VERSION = 2
+BOOM_CLIENT_FRAME = 333
+BOOM_SERVER_FRAME = 349
+VOICE_MAX_FRAME = 1200
+VOICE_MIN_INTERVAL = 0.014
+BOOM_MIN_INTERVAL = 0.016
+AUDIO_VOICE_QUEUE_MAX = 56
+AUDIO_MUSIC_QUEUE_MAX = 14
+VOICE_RELAY_DISTANCE = 1100.0
+BOOM_RELAY_DISTANCE = 1750.0
 WS_HEARTBEAT = 15
 CHAT_MAX_LENGTH = 140
 CHAT_COOLDOWN = 0.75
@@ -1415,7 +1423,7 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'connected': False, 'ws': None, 'input': sanitize_input({}),
         'sessionToken': session, 'remove_task': None,
         'lastVoiceAt': 0.0, 'lastBoomAt': 0.0, 'lastChatAt': 0.0, 'lastEmoteAt': 0.0,
-        'audioQueue': None, 'audioTask': None, 'voiceWs': None,
+        'voiceQueue': None, 'voiceWake': None, 'voiceTask': None, 'voiceWs': None, 'musicQueue': None, 'musicWake': None, 'musicTask': None, 'musicWs': None,
         'emote': '', 'emoteUntil': 0.0, 'emoteSerial': 0,
         'lastInputAt': time.monotonic(), 'isAdmin': False, 'frozen': False,
         'records': sanitize_records(records),
@@ -1676,18 +1684,26 @@ async def locked_send_bytes(ws, data):
             await ws.send_bytes(data)
 
 
-async def audio_sender(player):
+async def stream_sender(player, queue_key, wake_key, ws_key):
     try:
         while player.get('connected'):
-            queue = player.get('audioQueue')
-            if queue is None:
+            queue = player.get(queue_key)
+            wake = player.get(wake_key)
+            if queue is None or wake is None:
                 return
-            packet = await queue.get()
-            ws = player.get('voiceWs')
+            if not queue:
+                wake.clear()
+                if queue:
+                    wake.set()
+                    continue
+                await wake.wait()
+                continue
+            packet = queue.popleft()
+            ws = player.get(ws_key)
             if not ws or ws.closed:
                 continue
             try:
-                await asyncio.wait_for(locked_send_bytes(ws, packet), timeout=0.08)
+                await asyncio.wait_for(locked_send_bytes(ws, packet), timeout=0.10)
             except (asyncio.TimeoutError, ConnectionError):
                 continue
             except asyncio.CancelledError:
@@ -1698,35 +1714,47 @@ async def audio_sender(player):
         return
 
 
-def start_audio_sender(player):
-    task = player.get('audioTask')
+def start_stream_sender(player, kind):
+    if kind == 'voice':
+        task_key, queue_key, wake_key, ws_key, maxlen = 'voiceTask', 'voiceQueue', 'voiceWake', 'voiceWs', AUDIO_VOICE_QUEUE_MAX
+    else:
+        task_key, queue_key, wake_key, ws_key, maxlen = 'musicTask', 'musicQueue', 'musicWake', 'musicWs', AUDIO_MUSIC_QUEUE_MAX
+    task = player.get(task_key)
     if task and not task.done():
         task.cancel()
-    player['audioQueue'] = asyncio.Queue(maxsize=AUDIO_QUEUE_MAX)
-    player['audioTask'] = asyncio.create_task(audio_sender(player))
+    player[queue_key] = deque(maxlen=maxlen)
+    player[wake_key] = asyncio.Event()
+    player[task_key] = asyncio.create_task(stream_sender(player, queue_key, wake_key, ws_key))
 
 
-def stop_audio_sender(player):
-    task = player.get('audioTask')
+def stop_stream_sender(player, kind):
+    if kind == 'voice':
+        task_key, queue_key, wake_key = 'voiceTask', 'voiceQueue', 'voiceWake'
+    else:
+        task_key, queue_key, wake_key = 'musicTask', 'musicQueue', 'musicWake'
+    task = player.get(task_key)
     if task and not task.done():
         task.cancel()
-    player['audioTask'] = None
-    player['audioQueue'] = None
+    player[task_key] = None
+    player[queue_key] = None
+    player[wake_key] = None
 
 
-def enqueue_audio(player, packet):
-    queue = player.get('audioQueue')
-    if queue is None:
+def stop_all_audio_senders(player):
+    stop_stream_sender(player, 'voice')
+    stop_stream_sender(player, 'music')
+
+
+def enqueue_audio(player, packet, is_boombox=False):
+    queue_key = 'musicQueue' if is_boombox else 'voiceQueue'
+    wake_key = 'musicWake' if is_boombox else 'voiceWake'
+    queue = player.get(queue_key)
+    wake = player.get(wake_key)
+    if queue is None or wake is None:
         return
-    if queue.full():
-        try:
-            queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-    try:
-        queue.put_nowait(packet)
-    except asyncio.QueueFull:
-        pass
+    # Old packets are dropped by deque(maxlen) so latency stays bounded.
+    queue.append(packet)
+    wake.set()
 
 
 async def send(ws, obj):
@@ -3145,7 +3173,7 @@ async def ws_handler(request):
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                # V39 uses /voice so gameplay snapshots cannot block audio packets.
+                # V41 keeps gameplay, live voice, and boombox music on separate channels.
                 continue
             if msg.type != WSMsgType.TEXT:
                 continue
@@ -3320,11 +3348,16 @@ async def ws_handler(request):
             room, player = state
             if player.get('ws') is ws:
                 player['connected'] = False
-                stop_audio_sender(player)
+                stop_all_audio_senders(player)
                 voice_ws = player.get('voiceWs')
+                music_ws = player.get('musicWs')
                 player['voiceWs'] = None
+                player['musicWs'] = None
                 if voice_ws and not voice_ws.closed:
                     try: await voice_ws.close(code=1001, message=b'game disconnected')
+                    except Exception: pass
+                if music_ws and not music_ws.closed:
+                    try: await music_ws.close(code=1001, message=b'game disconnected')
                     except Exception: pass
                 player['ws'] = None
                 if player['id'] in room.get('boomboxes', {}):
@@ -3338,6 +3371,24 @@ async def ws_handler(request):
                 await snapshot(room)
                 player['remove_task'] = asyncio.create_task(remove_later(room, player))
     return ws
+
+
+def audio_distance_ok(source_x, source_y, receiver, max_distance):
+    try:
+        dx = float(receiver.get('x') or 0) - float(source_x or 0)
+        dy = float(receiver.get('y') or 0) - float(source_y or 0)
+        return dx * dx + dy * dy <= max_distance * max_distance
+    except Exception:
+        return False
+
+
+def boombox_source_position(room, player):
+    boom = public_boombox(room, player['id'])
+    if not boom or not boom.get('active'):
+        return None
+    if boom.get('mode') == 'held':
+        return float(player.get('x') or 0), float(player.get('y') or 0), boom.get('space', player.get('space', 'world'))
+    return float(boom.get('x') or 0), float(boom.get('y') or 0), boom.get('space', player.get('space', 'world'))
 
 
 async def voice_ws_handler(request):
@@ -3372,32 +3423,25 @@ async def voice_ws_handler(request):
             try: await old.close(code=4004, message=b'replaced')
             except Exception: pass
         player['voiceWs'] = ws
-        start_audio_sender(player)
-        await send(ws, {'type':'voice-ready','id':player['id'],'codec':'32khz-ima-adpcm','channel':'dedicated'})
+        start_stream_sender(player, 'voice')
+        await send(ws, {'type':'voice-ready','id':player['id'],'codec':'24khz-pcm16-resampled','channel':'dedicated-voice'})
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
                 data = bytes(msg.data)
+                if len(data) != VOICE_CLIENT_FRAME or data[:1] != b'A' or data[1] != VOICE_CODEC_VERSION:
+                    continue
                 now = time.monotonic()
-                if len(data) != VOICE_CLIENT_FRAME or data[1] != VOICE_CODEC_VERSION or data[:1] not in (b'A', b'B'):
+                if now - float(player.get('lastVoiceAt') or 0) < VOICE_MIN_INTERVAL:
                     continue
-                is_boombox = data[:1] == b'B'
-                if is_boombox:
-                    boom = public_boombox(room, player['id'])
-                    if not boom or not boom.get('active'):
-                        continue
-                    source_space = boom.get('space', player.get('space','world'))
-                    clock_key = 'lastBoomAt'
-                else:
-                    source_space = player.get('space','world')
-                    clock_key = 'lastVoiceAt'
-                if now - float(player.get(clock_key) or 0) < VOICE_MIN_INTERVAL:
-                    continue
-                player[clock_key] = now
+                player['lastVoiceAt'] = now
+                source_space = player.get('space', 'world')
                 packet = data[:2] + player['id'].encode('ascii') + data[2:]
+                sx, sy = player.get('x', 0), player.get('y', 0)
                 for other in connected(room, source_space):
                     if other is player or not other.get('voiceWs') or other['voiceWs'].closed:
                         continue
-                    enqueue_audio(other, packet)
+                    if audio_distance_ok(sx, sy, other, VOICE_RELAY_DISTANCE):
+                        enqueue_audio(other, packet, is_boombox=False)
             elif msg.type == WSMsgType.TEXT:
                 try: message = json.loads(msg.data)
                 except Exception: continue
@@ -3408,7 +3452,74 @@ async def voice_ws_handler(request):
     finally:
         if player and player.get('voiceWs') is ws:
             player['voiceWs'] = None
-            stop_audio_sender(player)
+            stop_stream_sender(player, 'voice')
+    return ws
+
+
+async def music_ws_handler(request):
+    ws = web.WebSocketResponse(max_msg_size=2_000_000, heartbeat=12, autoping=True, compress=False)
+    await ws.prepare(request)
+    player = None
+    room = None
+    try:
+        first = await asyncio.wait_for(ws.receive(), timeout=8.0)
+        if first.type != WSMsgType.TEXT:
+            await ws.close(code=4011, message=b'music join required')
+            return ws
+        try:
+            hello = json.loads(first.data)
+        except Exception:
+            hello = {}
+        if hello.get('type') != 'music-join' or int(hello.get('build') or 0) != BUILD or int(hello.get('protocol') or 0) != PROTOCOL:
+            await ws.close(code=4012, message=b'music version mismatch')
+            return ws
+        session = token(hello.get('sessionToken'))
+        for candidate_room in rooms.values():
+            player_id = candidate_room.get('sessions', {}).get(session)
+            candidate = candidate_room.get('players', {}).get(player_id) if player_id else None
+            if candidate and candidate.get('connected'):
+                room, player = candidate_room, candidate
+                break
+        if not player or not room:
+            await ws.close(code=4013, message=b'unknown music session')
+            return ws
+        old = player.get('musicWs')
+        if old and old is not ws and not old.closed:
+            try: await old.close(code=4014, message=b'replaced')
+            except Exception: pass
+        player['musicWs'] = ws
+        start_stream_sender(player, 'music')
+        await send(ws, {'type':'music-ready','id':player['id'],'codec':'32khz-adpcm-continuous','channel':'dedicated-music'})
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                data = bytes(msg.data)
+                if len(data) != BOOM_CLIENT_FRAME or data[:1] != b'B' or data[1] != BOOM_CODEC_VERSION:
+                    continue
+                now = time.monotonic()
+                if now - float(player.get('lastBoomAt') or 0) < BOOM_MIN_INTERVAL:
+                    continue
+                player['lastBoomAt'] = now
+                source = boombox_source_position(room, player)
+                if not source:
+                    continue
+                sx, sy, source_space = source
+                packet = data[:2] + player['id'].encode('ascii') + data[2:]
+                for other in connected(room, source_space):
+                    if other is player or not other.get('musicWs') or other['musicWs'].closed:
+                        continue
+                    if audio_distance_ok(sx, sy, other, BOOM_RELAY_DISTANCE):
+                        enqueue_audio(other, packet, is_boombox=True)
+            elif msg.type == WSMsgType.TEXT:
+                try: message = json.loads(msg.data)
+                except Exception: continue
+                if message.get('type') == 'music-ping':
+                    await send(ws, {'type':'music-pong','now':int(time.time()*1000)})
+    except (asyncio.TimeoutError, ConnectionError):
+        pass
+    finally:
+        if player and player.get('musicWs') is ws:
+            player['musicWs'] = None
+            stop_stream_sender(player, 'music')
     return ws
 
 
@@ -3443,12 +3554,12 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v39-join-reliability-pro',
+        'service': 'green-floor-v41-spatial-audio-pro',
         'rooms': len(rooms),
         'maxPlayers': MAX_PLAYERS,
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'dedicated-32khz-ima-adpcm-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-join-reliability-v39',
+        'voice': 'dedicated-24khz-pcm16-resampled', 'music': 'dedicated-32khz-adpcm-continuous', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-spatial-audio-v41',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
@@ -3472,6 +3583,8 @@ app.router.add_get('/ws', ws_handler)
 app.router.add_get('/ws/', ws_handler)
 app.router.add_get('/voice', voice_ws_handler)
 app.router.add_get('/voice/', voice_ws_handler)
+app.router.add_get('/music', music_ws_handler)
+app.router.add_get('/music/', music_ws_handler)
 app.on_startup.append(startup)
 app.on_cleanup.append(cleanup)
 
