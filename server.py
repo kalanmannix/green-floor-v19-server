@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 32
-PROTOCOL = 27
+BUILD = 34
+PROTOCOL = 29
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
@@ -23,13 +23,15 @@ SPEED = 285
 SPRINT = 1.58
 STAMINA_MAX = 100
 SPRINT_DRAIN = 29
-STAMINA_REGEN = 24
+STAMINA_REGEN = 27
+STAMINA_REGEN_DELAY = 0.68
 PUNCH_RANGE = 176
 PUNCH_LOCK = 680
-PARRY_ACTIVE = 0.22
-PARRY_RECOVERY = 0.48
-PARRY_COOLDOWN = 1.50
-PARRY_STUN = 0.72
+PARRY_ACTIVE = 0.36
+PARRY_RECOVERY = 0.30
+PARRY_COOLDOWN = 1.15
+PARRY_STUN = 0.66
+PARRY_FACING_ANGLE = 1.80
 DASH_DURATION = 0.52
 DASH_COOLDOWN = 1.45
 DASH_SPEED = 690
@@ -37,6 +39,11 @@ DASH_TURN_RATE = 4.25
 COMBO_RELEASE_PROTECTION = 0.34
 COMBO_INPUT_GRACE = 0.62
 ATTACK_QUEUE_LIMIT = 1
+EARLY_MASH_LIMIT = 1
+MASH_RECOVERY_PENALTY = 0.24
+COUNTER_DAMAGE_MULT = 1.25
+COUNTER_STUN_BONUS = 0.10
+DASH_INVULNERABILITY = 0.18
 KO_TIME = 3.0
 RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
@@ -92,8 +99,9 @@ STYLE_DATA = {
         "durations":[0.28,0.32,0.36,0.40,0.52],
         "windups":[0.09,0.11,0.13,0.15,0.21],
         "damage":[4,5,5,6,9], "knockback":[72,92,118,148,340],
+        "stamina":[8,9,10,11,15], "hitstun":[0.18,0.19,0.20,0.22,0.32],
         "advance":[18,23,18,25,34], "targetAdvance":[10,14,14,18,44],
-        "recovery":0.52,"reach":1.00
+        "recovery":0.52,"whiffRecovery":0.48,"reach":1.00
     },
     "Boxer": {
         "kinds":["boxer-jab","boxer-cross","boxer-lead-hook","boxer-uppercut","boxer-long-straight"],
@@ -101,8 +109,9 @@ STYLE_DATA = {
         "durations":[0.22,0.25,0.29,0.33,0.38],
         "windups":[0.065,0.075,0.095,0.115,0.13],
         "damage":[3,4,4,5,7], "knockback":[52,66,78,96,235],
+        "stamina":[6,7,7,8,11], "hitstun":[0.15,0.16,0.17,0.19,0.26],
         "advance":[15,20,15,20,28], "targetAdvance":[7,9,11,13,34],
-        "recovery":0.36,"reach":0.94
+        "recovery":0.36,"whiffRecovery":0.34,"reach":0.94
     },
     "Kickboxer": {
         "kinds":["kickbox-jab","kickbox-cross","kickbox-low-kick","kickbox-knee","kickbox-roundhouse"],
@@ -110,8 +119,9 @@ STYLE_DATA = {
         "durations":[0.25,0.29,0.36,0.39,0.49],
         "windups":[0.075,0.09,0.13,0.14,0.19],
         "damage":[4,4,6,6,9], "knockback":[66,78,112,128,315],
+        "stamina":[7,8,11,12,16], "hitstun":[0.17,0.18,0.22,0.24,0.32],
         "advance":[15,20,12,24,30], "targetAdvance":[9,11,15,17,40],
-        "recovery":0.50,"reach":1.10
+        "recovery":0.50,"whiffRecovery":0.48,"reach":1.10
     },
     "Karate": {
         "kinds":["karate-palm","karate-reverse-punch","karate-front-kick","karate-sidekick"],
@@ -119,8 +129,9 @@ STYLE_DATA = {
         "durations":[0.28,0.32,0.39,0.50],
         "windups":[0.09,0.105,0.145,0.20],
         "damage":[5,6,7,10], "knockback":[82,110,150,350],
+        "stamina":[8,9,12,16], "hitstun":[0.19,0.20,0.25,0.34],
         "advance":[16,23,20,32], "targetAdvance":[10,13,18,45],
-        "recovery":0.56,"reach":1.07
+        "recovery":0.56,"whiffRecovery":0.54,"reach":1.07
     },
     "Heavy Weapon": {
         "kinds":["weapon-overhead","weapon-backhand","weapon-thrust-heavy","weapon-finisher"],
@@ -128,8 +139,9 @@ STYLE_DATA = {
         "durations":[0.46,0.43,0.42,0.60],
         "windups":[0.20,0.18,0.17,0.27],
         "damage":[7,8,8,13], "knockback":[130,155,178,440],
+        "stamina":[13,14,15,20], "hitstun":[0.23,0.25,0.27,0.38],
         "advance":[23,21,30,38], "targetAdvance":[14,16,20,50],
-        "recovery":0.72,"reach":1.16
+        "recovery":0.72,"whiffRecovery":0.68,"reach":1.16
     },
     "Light Weapon": {
         "kinds":["weapon-diagonal","weapon-backslash","weapon-thrust","weapon-rising-cut","weapon-spin-finisher"],
@@ -137,8 +149,9 @@ STYLE_DATA = {
         "durations":[0.25,0.27,0.29,0.31,0.43],
         "windups":[0.075,0.085,0.09,0.10,0.16],
         "damage":[3,4,4,5,8], "knockback":[58,70,82,98,275],
+        "stamina":[6,7,8,9,12], "hitstun":[0.15,0.16,0.17,0.18,0.28],
         "advance":[16,18,24,18,30], "targetAdvance":[8,10,12,13,38],
-        "recovery":0.38,"reach":1.02
+        "recovery":0.38,"whiffRecovery":0.36,"reach":1.02
     },
 }
 STYLE_ALIASES = {"Street Fighting":"Street Brawler","Boxing":"Boxer","Muay Thai":"Kickboxer","Wrestling":"Street Brawler","Judo":"Street Brawler"}
@@ -530,7 +543,9 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'dashActive': False, 'dashEndAt': 0, 'dashReadyAt': 0, 'dashAngle': 0, 'dashAttackPending': False,
         'comboOwner': None, 'comboTarget': None, 'comboStep': -1, 'comboLength': 0, 'comboToken': 0,
         'comboDeadline': 0, 'comboDashStarter': False,
-        'attackAnimatingUntil': 0, 'attackQueueOpenAt': 0, 'attackQueued': False, 'attackActionSerial': 0,
+        'attackAnimatingUntil': 0, 'attackQueueOpenAt': 0, 'attackQueueCloseAt': 0,
+        'attackQueued': False, 'attackHitConfirmed': False, 'earlyMashCount': 0, 'chainLocked': False,
+        'attackActionSerial': 0, 'vulnerableUntil': 0, 'lastCombatFeedbackAt': 0,
         'space': 'world', 'roomOwner': None,
         'title': 'New Student',
         'inventory': sanitize_inventory(inventory),
@@ -593,6 +608,10 @@ def cancel_combo(room, attacker, release_target=True):
     attacker['attackQueued'] = False
     attacker['attackAnimatingUntil'] = 0
     attacker['attackQueueOpenAt'] = 0
+    attacker['attackQueueCloseAt'] = 0
+    attacker['attackHitConfirmed'] = False
+    attacker['earlyMashCount'] = 0
+    attacker['chainLocked'] = False
     if release_target and target_id and target_id != 'training-dummy':
         target = room['players'].get(target_id)
         if target and target.get('comboOwner') == attacker['id']:
@@ -611,7 +630,12 @@ def public_player(player):
     now = time.monotonic()
     result['parrying'] = now < float(player.get('parryUntil') or 0)
     result['stunned'] = now < float(player.get('stunnedUntil') or 0)
-    result['comboLocked'] = bool(player.get('comboOwner'))
+    result['comboLocked'] = bool(player.get('comboOwner')) and now < float(player.get('stunnedUntil') or 0)
+    result['parryLocked'] = bool(player.get('comboOwner'))
+    result['chainReady'] = bool(player.get('attackHitConfirmed')) and not bool(player.get('chainLocked')) and not bool(player.get('attackQueued')) and now >= float(player.get('attackQueueOpenAt') or 0) and now <= float(player.get('attackQueueCloseAt') or 0)
+    result['attackQueued'] = bool(player.get('attackQueued'))
+    result['chainLocked'] = bool(player.get('chainLocked'))
+    result['vulnerable'] = now < float(player.get('vulnerableUntil') or 0)
     result['parryCooldown'] = max(0.0, float(player.get('parryReadyAt') or 0) - now)
     result['dashCooldown'] = max(0.0, float(player.get('dashReadyAt') or 0) - now)
     result['dashActive'] = bool(player.get('dashActive'))
@@ -1189,12 +1213,25 @@ def nearest_combat_target(room, attacker, max_distance):
 def parry_faces_attacker(defender, attacker):
     toward_attacker = math.atan2(attacker['y'] - defender['y'], attacker['x'] - defender['x'])
     facing_angle = float(defender.get('direction') or (0 if defender.get('facing', 1) >= 0 else math.pi))
-    return abs(angle_difference(toward_attacker, facing_angle)) <= 1.45
+    return abs(angle_difference(toward_attacker, facing_angle)) <= PARRY_FACING_ANGLE
+
+
+async def combat_feedback(player, message, state='info'):
+    now = time.monotonic()
+    # Prevent repeated click spam from flooding the socket or HUD.
+    if now - float(player.get('lastCombatFeedbackAt') or 0) < 0.16 and state != 'chain':
+        return
+    player['lastCombatFeedbackAt'] = now
+    if player.get('ws'):
+        await send(player['ws'], {'type':'combat-feedback','message':str(message)[:48],'state':state})
 
 
 async def parry(room, player):
     now = time.monotonic()
-    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or player.get('comboOwner') or player.get('comboTarget') or player.get('dashActive'):
+    if player.get('comboOwner'):
+        await combat_feedback(player, 'Parry before the first hit', 'parry-locked')
+        return
+    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or player.get('comboTarget') or player.get('dashActive'):
         return
     if now < float(player.get('parryReadyAt') or 0):
         return
@@ -1206,14 +1243,14 @@ async def parry(room, player):
     player['moveVx'] *= 0.25
     player['moveVy'] *= 0.25
     await broadcast(room, {'type':'combat','event':{
-        'kind':'parry-start','attackerId':player['id'],'targetId':None,'angle':player.get('direction',0),'visualMs':520,
+        'kind':'parry-start','attackerId':player['id'],'targetId':None,'angle':player.get('direction',0),'visualMs':400,
         'hit':False,'parried':False,'durationMs':round(PARRY_ACTIVE*1000),'x':player['x'],'y':player['y']-50
     }}, space=player.get('space','world'))
 
 
 async def dash(room, player, raw_x=0, raw_y=0):
     now = time.monotonic()
-    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or now < float(player.get('parryRecoveryUntil') or 0) or player.get('comboOwner') or player.get('comboTarget'):
+    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or now < float(player.get('parryRecoveryUntil') or 0) or player.get('comboTarget'):
         return
     if player.get('dashActive') or now < float(player.get('dashReadyAt') or 0):
         return
@@ -1224,6 +1261,12 @@ async def dash(room, player, raw_x=0, raw_y=0):
         angle = math.atan2(y, x)
     else:
         angle = float(player.get('direction') or (0 if player.get('facing',1) >= 0 else math.pi))
+    if player.get('comboOwner'):
+        owner = room['players'].get(player.get('comboOwner'))
+        if owner and owner.get('comboTarget') == player['id']:
+            cancel_combo(room, owner, release_target=True)
+        player['comboOwner'] = None
+    player['invulnerableUntil'] = max(float(player.get('invulnerableUntil') or 0), now + DASH_INVULNERABILITY)
     player['dashActive'] = True
     player['dashEndAt'] = now + DASH_DURATION
     player['dashReadyAt'] = now + DASH_DURATION + DASH_COOLDOWN
@@ -1245,9 +1288,10 @@ async def resolve_parry(room, attacker, defender, angle):
     now = time.monotonic()
     defender['parrying'] = False
     defender['parryUntil'] = 0
-    defender['parryRecoveryUntil'] = now + 0.11
-    defender['parryReadyAt'] = min(float(defender.get('parryReadyAt') or now), now + 0.42)
+    defender['parryRecoveryUntil'] = now + 0.09
+    defender['parryReadyAt'] = min(float(defender.get('parryReadyAt') or now), now + 0.34)
     attacker['stunnedUntil'] = max(float(attacker.get('stunnedUntil') or 0), now + PARRY_STUN)
+    attacker['vulnerableUntil'] = max(float(attacker.get('vulnerableUntil') or 0), now + PARRY_STUN + 0.12)
     attacker['dashActive'] = False
     attacker['dashAttackPending'] = False
     attacker['moveVx'] = attacker['moveVy'] = 0
@@ -1268,7 +1312,7 @@ async def broadcast_attack_start(room, attacker, target_id, style_name, style, s
         'hand':attacker.get('attackHand','right'),'attackKind':kind,
         'comboStep':step,'comboLength':len(style['kinds']),
         'hit':False,'dashAttack':dash_attack and step == 0,
-        'durationMs':round(duration*1000),'contactMs':round(windup*1000),'style':style_name,
+        'durationMs':round(duration*1000),'contactMs':round(windup*1000),'arcRadians':attack_arc_for_kind(kind),'style':style_name,
         'x':attacker['x']+math.cos(attacker.get('attackAngle',0))*80,
         'y':attacker['y']+math.sin(attacker.get('attackAngle',0))*80-46
     }}, space=attacker.get('space','world'))
@@ -1284,11 +1328,39 @@ def style_speed(attacker):
     return clamp(speed, 0.72, 1.48)
 
 
+def attack_arc_for_kind(kind):
+    kind = str(kind or '')
+    if any(token in kind for token in ('spin', 'roundhouse')):
+        return 1.18
+    if any(token in kind for token in ('hook', 'backslash', 'diagonal', 'rising-cut')):
+        return 0.92
+    if any(token in kind for token in ('sidekick', 'low-kick', 'front-kick')):
+        return 0.76
+    if any(token in kind for token in ('overhand', 'overhead', 'finisher', 'backhand', 'uppercut')):
+        return 0.70
+    return 0.58
+
+
+def attack_telegraph_floor(kind, step):
+    kind = str(kind or '')
+    step_bonus = min(0.026, max(0, int(step)) * 0.006)
+    if any(token in kind for token in ('finisher', 'spin', 'roundhouse', 'sidekick', 'overhand', 'overhead', 'backhand', 'thrust-heavy')):
+        return 0.235 + step_bonus
+    if any(token in kind for token in ('hook', 'uppercut', 'kick', 'knee', 'rising-cut', 'long-straight')):
+        return 0.175 + step_bonus
+    return 0.140 + step_bonus
+
+
 def move_timing(attacker, style, step):
     speed = style_speed(attacker)
+    kind = style['kinds'][step]
     duration = float(style['durations'][step]) / speed
-    windup = min(duration * 0.68, float(style['windups'][step]) / speed)
-    return max(0.18, duration), max(0.045, windup)
+    # Attack upgrades may shorten recovery, but the readable startup tell stays consistent.
+    raw_windup = float(style['windups'][step]) / math.sqrt(speed)
+    windup = max(attack_telegraph_floor(kind, step), raw_windup)
+    minimum_followthrough = 0.105 if windup < 0.17 else 0.145
+    duration = max(duration, windup + minimum_followthrough)
+    return max(0.235, duration), min(duration * 0.72, windup)
 
 
 def target_position(room, target_id):
@@ -1316,10 +1388,20 @@ async def finish_manual_attack(room, attacker_id, token_value, action_serial, st
         return
     attacker['attackAnimatingUntil'] = 0
     attacker['attackQueueOpenAt'] = 0
+    attacker['attackQueueCloseAt'] = 0
+    style = STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler'])
     if final:
-        target_id = attacker.get('comboTarget')
         attacker['attackQueued'] = False
-        attacker['attackRecoveryUntil'] = now + float(STYLE_DATA.get(style_name, STYLE_DATA['Street Brawler']).get('recovery') or .4)
+        recovery = float(style.get('recovery') or .4)
+        attacker['attackRecoveryUntil'] = now + recovery
+        attacker['vulnerableUntil'] = max(float(attacker.get('vulnerableUntil') or 0), now + recovery * 0.78)
+        cancel_combo(room, attacker, release_target=True)
+        return
+    if hit_confirmed and attacker.get('chainLocked'):
+        attacker['attackQueued'] = False
+        attacker['attackRecoveryUntil'] = now + MASH_RECOVERY_PENALTY
+        attacker['vulnerableUntil'] = max(float(attacker.get('vulnerableUntil') or 0), now + MASH_RECOVERY_PENALTY)
+        await combat_feedback(attacker, 'Mash blocked the chain', 'mash')
         cancel_combo(room, attacker, release_target=True)
         return
     if hit_confirmed and attacker.get('attackQueued') and attacker.get('comboTarget'):
@@ -1328,8 +1410,14 @@ async def finish_manual_attack(room, attacker_id, token_value, action_serial, st
         return
     if not hit_confirmed:
         attacker['attackQueued'] = False
-        attacker['attackRecoveryUntil'] = now + 0.22
+        recovery = float(style.get('whiffRecovery') or .42)
+        attacker['attackRecoveryUntil'] = now + recovery
+        attacker['vulnerableUntil'] = max(float(attacker.get('vulnerableUntil') or 0), now + recovery)
+        await combat_feedback(attacker, 'Whiff — punishable', 'whiff')
         cancel_combo(room, attacker, release_target=True)
+        return
+    # A confirmed hit may still be linked by one deliberate click shortly after the animation.
+    attacker['attackRecoveryUntil'] = now + 0.055
 
 
 async def resolve_manual_attack(room, attacker_id, token_value, action_serial, style_name, step, target_id, dash_attack, duration, windup):
@@ -1350,19 +1438,20 @@ async def resolve_manual_attack(room, attacker_id, token_value, action_serial, s
     final = step == len(style['kinds'])-1
     if position:
         tx, ty = position
-        angle = math.atan2(ty-attacker['y'], tx-attacker['x'])
+        target_angle = math.atan2(ty-attacker['y'], tx-attacker['x'])
+        angle = float(attacker.get('attackAngle') or attacker.get('direction') or 0)
         distance = math.hypot(tx-attacker['x'], ty-attacker['y'])
+        angle_error = abs(angle_difference(target_angle, angle))
         weapon = (attacker.get('loadout') or {}).get('weapon')
         reach_mult = float(attacker.get('reachMult') or 1) * float(style.get('reach') or 1)
         if weapon:
             reach_mult *= float(attacker.get('weaponReachMult') or 1)
         step_reach = (PUNCH_RANGE + (30 if dash_attack and step == 0 else 0) + min(32, step*6)) * reach_mult
-        if distance <= step_reach:
-            attacker['attackAngle'] = angle
-            attacker['direction'] = angle
-            attacker['facing'] = 1 if math.cos(angle) >= 0 else -1
+        attack_arc = attack_arc_for_kind(kind)
+        if distance <= step_reach and angle_error <= attack_arc:
             if target_id == 'training-dummy':
                 hit_confirmed = True
+                attacker['attackHitConfirmed'] = True
                 attacker['comboTarget'] = 'training-dummy'
                 attacker['comboStep'] = step
                 attacker['comboLength'] = len(style['kinds'])
@@ -1386,6 +1475,7 @@ async def resolve_manual_attack(room, attacker_id, token_value, action_serial, s
                         hit_confirmed = False
                     else:
                         hit_confirmed = True
+                        attacker['attackHitConfirmed'] = True
                         attacker['comboTarget'] = target_id
                         attacker['comboStep'] = step
                         attacker['comboLength'] = len(style['kinds'])
@@ -1401,6 +1491,9 @@ async def resolve_manual_attack(room, attacker_id, token_value, action_serial, s
                             damage_mult = float(attacker.get('punchDamageMult') or 1)
                         if dash_attack and step == 0:
                             damage_mult *= 1.08
+                        counter = time.monotonic() < float(target.get('vulnerableUntil') or 0)
+                        if counter:
+                            damage_mult *= COUNTER_DAMAGE_MULT
                         damage = max(1, round(base_damage * damage_mult))
                         target['health'] = max(0, float(target.get('health') or 0)-damage)
                         knockback = float(style['knockback'][step]) * (1.12 if dash_attack and step == 0 else 1)
@@ -1410,7 +1503,8 @@ async def resolve_manual_attack(room, attacker_id, token_value, action_serial, s
                         attacker['impulseY'] += math.sin(angle)*min(128, knockback*.30)
                         move_with_collisions(attacker, math.cos(angle)*float(style['advance'][step]), math.sin(angle)*float(style['advance'][step]))
                         move_with_collisions(target, math.cos(angle)*float(style['targetAdvance'][step]), math.sin(angle)*float(style['targetAdvance'][step]))
-                        target['stunnedUntil'] = max(float(target.get('stunnedUntil') or 0), attacker['comboDeadline'] + 0.05)
+                        hitstun = float(style.get('hitstun', [0.18] * len(style['kinds']))[step]) + (COUNTER_STUN_BONUS if counter else 0)
+                        target['stunnedUntil'] = max(float(target.get('stunnedUntil') or 0), time.monotonic() + hitstun)
                         target['moving'] = target['sprinting'] = False
                         target['moveVx'] = target['moveVy'] = 0
                         target['parrying'] = False
@@ -1422,7 +1516,7 @@ async def resolve_manual_attack(room, attacker_id, token_value, action_serial, s
                         await broadcast(room, {'type':'combat','event':{
                             'kind':'attack-impact','attackerId':attacker_id,'targetId':target_id,'angle':angle,
                             'hand':attacker['attackHand'],'attackKind':kind,'comboStep':step,'comboLength':len(style['kinds']),
-                            'hit':True,'damage':damage,'knockedOut':knocked_out,'finisher':final,'dashAttack':dash_attack and step == 0,
+                            'hit':True,'damage':damage,'knockedOut':knocked_out,'finisher':final,'dashAttack':dash_attack and step == 0,'counter':counter,
                             'durationMs':round(duration*1000),'style':style_name,
                             'x':(attacker['x']+target['x'])/2,'y':(attacker['y']+target['y'])/2-48
                         }}, space=attacker.get('space','world'))
@@ -1443,10 +1537,23 @@ async def start_attack(room, attacker, dash_attack=False, from_queue=False):
         return
     if attacker.get('dashActive') and not dash_attack:
         return
+
     if now < float(attacker.get('attackAnimatingUntil') or 0):
-        if not dash_attack and not attacker.get('attackQueued'):
+        if dash_attack or attacker.get('attackQueued'):
+            return
+        open_at = float(attacker.get('attackQueueOpenAt') or 0)
+        close_at = float(attacker.get('attackQueueCloseAt') or 0)
+        if now < open_at:
+            attacker['earlyMashCount'] = int(attacker.get('earlyMashCount') or 0) + 1
+            if attacker['earlyMashCount'] >= EARLY_MASH_LIMIT:
+                attacker['chainLocked'] = True
+                await combat_feedback(attacker, 'Too early — chain locked', 'mash')
+            return
+        if now <= close_at and attacker.get('attackHitConfirmed') and not attacker.get('chainLocked'):
             attacker['attackQueued'] = True
+            await combat_feedback(attacker, 'Chain queued', 'chain')
         return
+
     if not from_queue and not attacker.get('comboTarget') and not dash_attack and now < float(attacker.get('attackRecoveryUntil') or 0):
         return
 
@@ -1457,6 +1564,9 @@ async def start_attack(room, attacker, dash_attack=False, from_queue=False):
         cancel_combo(room, attacker)
         combo_target = None
     if combo_target:
+        if attacker.get('chainLocked'):
+            cancel_combo(room, attacker)
+            return
         step = int(attacker.get('comboStep') or 0) + 1
         if step >= len(style['kinds']):
             cancel_combo(room, attacker)
@@ -1491,11 +1601,29 @@ async def start_attack(room, attacker, dash_attack=False, from_queue=False):
         attacker['comboLength'] = len(style['kinds'])
         attacker['comboDashStarter'] = bool(dash_attack)
 
+    weapon = (attacker.get('loadout') or {}).get('weapon')
+    stamina_cost = int(style.get('stamina', [8] * len(style['kinds']))[step])
+    if weapon:
+        path = str(weapon.get('path') or 'balanced')
+        stamina_cost += {'power':2, 'swift':-1, 'reach':1}.get(path, 0)
+    if dash_attack and step == 0:
+        stamina_cost += 4
+    stamina_cost = max(4, stamina_cost)
+    if float(attacker.get('stamina') or 0) < stamina_cost:
+        await combat_feedback(attacker, 'Low stamina', 'stamina')
+        attacker['attackRecoveryUntil'] = now + 0.18
+        if attacker.get('comboTarget'):
+            cancel_combo(room, attacker)
+        return
+
     duration, windup = move_timing(attacker, style, step)
     kind = style['kinds'][step]
     hand = style.get('hands',[])[step] if step < len(style.get('hands',[])) else ('left' if step % 2 == 0 else 'right')
+    attacker['stamina'] = max(0, float(attacker.get('stamina') or 0) - stamina_cost)
+    attacker['lastStaminaUseAt'] = now
     attacker['attackHand'] = hand
     attacker['attackKind'] = kind
+    attacker['attackArc'] = attack_arc_for_kind(kind)
     attacker['attackAngle'] = float(attacker.get('attackAngle') or attacker.get('direction') or 0)
     attacker['sprinting'] = False
     attacker['parrying'] = False
@@ -1504,8 +1632,14 @@ async def start_attack(room, attacker, dash_attack=False, from_queue=False):
     attacker['dashAttackPending'] = False
     attacker['lastPunchAt'] = now
     attacker['attackQueued'] = False
+    attacker['attackHitConfirmed'] = False
+    attacker['earlyMashCount'] = 0
+    attacker['chainLocked'] = False
     attacker['attackAnimatingUntil'] = now + duration
-    attacker['attackQueueOpenAt'] = now + min(duration*.32, 0.14)
+    queue_open = now + max(windup + 0.055, duration * 0.48)
+    queue_close = min(now + duration - 0.025, queue_open + 0.17)
+    attacker['attackQueueOpenAt'] = queue_open
+    attacker['attackQueueCloseAt'] = max(queue_open + 0.055, queue_close)
     attacker['attackActionSerial'] = int(attacker.get('attackActionSerial') or 0) + 1
     action_serial = int(attacker['attackActionSerial'])
     await broadcast_attack_start(room, attacker, target_id, style_name, style, step, kind, duration, windup, dash_attack)
@@ -1863,9 +1997,9 @@ def simulate(room, dt, now):
         y = control['y'] / length if length > 1 else control['y']
         stunned = now < float(player.get('stunnedUntil') or 0)
         in_parry_recovery = now < float(player.get('parryRecoveryUntil') or 0)
-        combo_locked = bool(player.get('comboOwner'))
+        combo_locked = bool(player.get('comboOwner')) and stunned
         combo_attacking = bool(player.get('comboTarget'))
-        can_act = not player['knockedOut'] and not stunned and not combo_locked and not in_parry_recovery
+        can_act = not player['knockedOut'] and not stunned and not in_parry_recovery
         if player.get('emote') and (now >= float(player.get('emoteUntil') or 0) or length > .08 or player['knockedOut'] or stunned or combo_locked or combo_attacking or player.get('dashActive') or player.get('parrying')):
             cancel_emote(player)
 
@@ -1902,7 +2036,7 @@ def simulate(room, dt, now):
         if player['sprinting']:
             player['stamina'] = max(0, player['stamina'] - SPRINT_DRAIN * dt)
             player['lastStaminaUseAt'] = now
-        elif now - player['lastStaminaUseAt'] > .36:
+        elif now - player['lastStaminaUseAt'] > STAMINA_REGEN_DELAY:
             player['stamina'] = min(STAMINA_MAX, player['stamina'] + STAMINA_REGEN * dt)
 
         speed = SPEED * player.get('speedMult', 1)
@@ -2201,11 +2335,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v32-pro',
+        'service': 'green-floor-v34-pro',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': '32khz-ima-adpcm-pro-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'manual-click-combos-distinct-procedural-attacks-v32',
+        'voice': '32khz-ima-adpcm-pro-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'readable-committed-attacks-easier-neutral-parry-v34',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
