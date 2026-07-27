@@ -1,11 +1,5 @@
-# Green Floor V41 — Render Pro clear voice server
+# Green Floor V45 Render Pro Server
 
-Deploy this folder to the Render Pro web service, then confirm `/health` reports `"build": 40`.
+Deploy this folder to Render before deploying the matching V45 Netlify client. The `/health` endpoint should report build 45 and protocol 39.
 
-V41 keeps gameplay and voice on separate WebSockets and gives live speech its own high-priority bounded queue. Voice uses 24 kHz mono PCM16; boombox music stays on compact ADPCM and can no longer crowd speech out of the relay. V39 multi-device join recovery remains included.
-
-
-V41 audio service:
-- /voice carries only live PCM speech.
-- /music carries only boombox ADPCM.
-- Server applies room and distance filtering before relay.
+V45 retains the V44 server-authoritative item, knockdown, ragdoll, physics, voice, and boombox systems. The matching client adds shared grip coordinates, two-arm item tracking, and eased pickup/place/throw presentation.
