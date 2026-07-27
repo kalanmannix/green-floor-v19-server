@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 38
-PROTOCOL = 33
+BUILD = 39
+PROTOCOL = 34
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
@@ -3145,7 +3145,7 @@ async def ws_handler(request):
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                # V38 uses /voice so gameplay snapshots cannot block audio packets.
+                # V39 uses /voice so gameplay snapshots cannot block audio packets.
                 continue
             if msg.type != WSMsgType.TEXT:
                 continue
@@ -3166,12 +3166,12 @@ async def ws_handler(request):
                     await send(ws, {'type':'character-auth-failed'}); break
                 existing = room['players'].get(character_id)
                 if existing and existing.get('connected'):
-                    old_ws = existing.get('ws')
-                    existing['connected'] = False; stop_audio_sender(existing); existing['ws'] = None
-                    if old_ws:
-                        await send(old_ws, {'type':'duplicate-login'})
-                        try: await old_ws.close()
-                        except Exception: pass
+                    # Never kick the player who is already online. A second device may have
+                    # copied the same local character identity; tell the newcomer to create
+                    # a fresh identity and reconnect instead.
+                    await send(ws, {'type':'duplicate-character','message':'This character identity is already online.'})
+                    await ws.close(code=4009, message=b'duplicate character')
+                    break
                 source = stored or {}
                 player = existing if existing and not existing.get('connected') else make_player(
                     source.get('name') or message.get('name'), source.get('profile') or message.get('profile'), source.get('progress') or message.get('progress'),
@@ -3443,11 +3443,12 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v38-stability-pro',
+        'service': 'green-floor-v39-join-reliability-pro',
         'rooms': len(rooms),
+        'maxPlayers': MAX_PLAYERS,
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': 'dedicated-32khz-ima-adpcm-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-stability-ui-object-overhaul-v38',
+        'voice': 'dedicated-32khz-ima-adpcm-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'multiplayer-join-reliability-v39',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
@@ -3468,7 +3469,9 @@ app = web.Application(client_max_size=12_000_000)
 app.router.add_get('/', health)
 app.router.add_get('/health', health)
 app.router.add_get('/ws', ws_handler)
+app.router.add_get('/ws/', ws_handler)
 app.router.add_get('/voice', voice_ws_handler)
+app.router.add_get('/voice/', voice_ws_handler)
 app.on_startup.append(startup)
 app.on_cleanup.append(cleanup)
 
