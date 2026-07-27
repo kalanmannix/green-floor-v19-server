@@ -10,8 +10,8 @@ import string
 import time
 from aiohttp import web, WSMsgType
 
-BUILD = 34
-PROTOCOL = 29
+BUILD = 36
+PROTOCOL = 31
 MAX_PLAYERS = 16
 WORLD_W = 7200
 WORLD_H = 4800
@@ -47,6 +47,57 @@ DASH_INVULNERABILITY = 0.18
 KO_TIME = 3.0
 RECONNECT_GRACE = 25.0
 INTERACT_RANGE = 145
+PHYSICS_GRAB_RANGE = 132
+PHYSICS_HELP_RANGE = 118
+PHYSICS_KICK_RANGE = 148
+PHYSICS_THROW_CHARGE_MAX = 1.25
+PHYSICS_THROW_MIN = 470
+PHYSICS_THROW_MAX = 1160
+PHYSICS_OBJECT_RESET_TIME = 18.0
+GRENADE_COST = 10
+GRENADE_MAX = 4
+GRENADE_FUSE = 2.35
+GRENADE_RADIUS = 430
+GRENADE_COOLDOWN = 0.55
+GRAVITY_GRENADE_COST = 16
+GRAVITY_GRENADE_MAX = 3
+GRAVITY_GRENADE_FUSE = 1.15
+GRAVITY_FIELD_DURATION = 2.85
+GRAVITY_FIELD_RADIUS = 560
+GRAVITY_PULL = 980
+GRAVITY_RELEASE_FORCE = 760
+AIRSTRIKE_COST = 30
+AIRSTRIKE_MAX = 1
+AIRSTRIKE_WARNING = 3.6
+AIRSTRIKE_RADIUS = 520
+AIRSTRIKE_IMPACTS = 6
+AIRSTRIKE_COOLDOWN = 75.0
+LOW_GRAVITY_DURATION = 34.0
+LOW_GRAVITY_FIRST_DELAY = 70.0
+LOW_GRAVITY_INTERVAL_MIN = 220.0
+LOW_GRAVITY_INTERVAL_MAX = 340.0
+CARRY_RANGE = 118
+CART_MOUNT_RANGE = 122
+CART_CRASH_SPEED = 360
+TABLE_X, TABLE_Y, TABLE_W, TABLE_H = 2460, 1035, 190, 92
+TABLE_RESPAWN = 12.0
+HOOP_X, HOOP_Y = 2710, 900
+OBJECT_TYPES = {
+    'cone': {'radius': 21, 'mass': 0.45, 'bounce': 0.54, 'friction': 2.25, 'throw': 1.14, 'kick': 1.18, 'downSpeed': 690, 'stunSpeed': 360, 'label': 'traffic cone'},
+    'chair': {'radius': 32, 'mass': 1.15, 'bounce': 0.34, 'friction': 2.80, 'throw': 0.86, 'kick': 0.86, 'downSpeed': 430, 'stunSpeed': 260, 'label': 'folding chair'},
+    'trashcan': {'radius': 38, 'mass': 1.75, 'bounce': 0.27, 'friction': 3.20, 'throw': 0.64, 'kick': 0.66, 'downSpeed': 320, 'stunSpeed': 220, 'label': 'trash can'},
+    'basketball': {'radius': 19, 'mass': 0.34, 'bounce': 0.78, 'friction': 1.35, 'throw': 1.24, 'kick': 1.32, 'downSpeed': 850, 'stunSpeed': 470, 'label': 'basketball'},
+    'grenade': {'radius': 14, 'mass': 0.38, 'bounce': 0.62, 'friction': 1.65, 'throw': 1.08, 'kick': 1.16, 'downSpeed': 9999, 'stunSpeed': 9999, 'label': 'knockback grenade'},
+    'gravity-grenade': {'radius': 15, 'mass': 0.42, 'bounce': 0.58, 'friction': 1.55, 'throw': 1.05, 'kick': 1.10, 'downSpeed': 9999, 'stunSpeed': 9999, 'label': 'gravity grenade'},
+    'cart': {'radius': 48, 'mass': 2.5, 'bounce': 0.20, 'friction': 2.20, 'throw': 0.0, 'kick': 0.42, 'downSpeed': 390, 'stunSpeed': 250, 'label': 'shopping cart'},
+}
+PHYSICS_SPAWNS = [
+    ('cone-1','cone',1885,850), ('cone-2','cone',1945,910),
+    ('chair-1','chair',2070,850), ('chair-2','chair',2140,930),
+    ('trashcan-1','trashcan',2255,855),
+    ('basketball-1','basketball',2380,865), ('basketball-2','basketball',2440,950),
+    ('cart-1','cart',2590,870),
+]
 VOICE_CODEC_VERSION = 2
 VOICE_CLIENT_FRAME = 333
 VOICE_SERVER_FRAME = 349
@@ -509,6 +560,745 @@ def apply_progress(player, raw):
     apply_attributes(player, preserve_health=True)
 
 
+
+def make_physics_object(object_id, kind, x, y):
+    spec = OBJECT_TYPES[kind]
+    return {
+        'id': object_id, 'type': kind, 'x': float(x), 'y': float(y),
+        'vx': 0.0, 'vy': 0.0, 'angle': random.random() * math.tau,
+        'angularVelocity': 0.0, 'radius': spec['radius'], 'heldBy': None,
+        'space': 'world', 'spawnX': float(x), 'spawnY': float(y),
+        'lastThrower': None, 'ownerImmuneUntil': 0.0, 'lastHitAt': {},
+        'fuseEnd': 0.0, 'fieldEnd': 0.0, 'createdAt': time.monotonic(), 'lastActiveAt': time.monotonic(),
+        'scoredAt': 0.0, 'riderId': None, 'lastCollisionAt': 0.0,
+    }
+
+
+def create_world_objects():
+    return {object_id: make_physics_object(object_id, kind, x, y) for object_id, kind, x, y in PHYSICS_SPAWNS}
+
+
+def public_physics_object(obj, now=None):
+    now = time.monotonic() if now is None else now
+    result = {
+        'id': obj['id'], 'type': obj['type'], 'x': round(float(obj.get('x') or 0), 2),
+        'y': round(float(obj.get('y') or 0), 2), 'vx': round(float(obj.get('vx') or 0), 2),
+        'vy': round(float(obj.get('vy') or 0), 2), 'angle': round(float(obj.get('angle') or 0), 4),
+        'angularVelocity': round(float(obj.get('angularVelocity') or 0), 3),
+        'heldBy': obj.get('heldBy'), 'space': obj.get('space','world'),
+    }
+    if obj.get('type') in ('grenade','gravity-grenade'):
+        result['fuseMs'] = max(0, int((float(obj.get('fuseEnd') or now) - now) * 1000))
+    if obj.get('type') == 'gravity-grenade':
+        result['fieldMs'] = max(0, int((float(obj.get('fieldEnd') or now) - now) * 1000))
+        result['fieldActive'] = now >= float(obj.get('fuseEnd') or now) and now < float(obj.get('fieldEnd') or 0)
+    if obj.get('type') == 'cart':
+        result['riderId'] = obj.get('riderId')
+    return result
+
+
+def public_table(room, now=None):
+    now = time.monotonic() if now is None else now
+    table = room.get('physicsTable') or {}
+    broken_until = float(table.get('brokenUntil') or 0)
+    return {
+        'x': TABLE_X, 'y': TABLE_Y, 'w': TABLE_W, 'h': TABLE_H,
+        'broken': now < broken_until,
+        'respawnMs': max(0, int((broken_until - now) * 1000)),
+        'serial': int(table.get('serial') or 0),
+    }
+
+
+def public_chaos_state(room, now=None):
+    now = time.monotonic() if now is None else now
+    low_until = float(room.get('lowGravityUntil') or 0)
+    warning_at = float(room.get('lowGravityWarningAt') or 0)
+    air = room.get('airstrike') or None
+    public_air = None
+    if air and float(air.get('endAt') or 0) > now:
+        public_air = {
+            'serial': int(air.get('serial') or 0), 'x': round(float(air.get('x') or 0), 1),
+            'y': round(float(air.get('y') or 0), 1), 'ownerId': air.get('ownerId'),
+            'impactMs': max(0, int((float(air.get('impactAt') or now)-now)*1000)),
+            'endMs': max(0, int((float(air.get('endAt') or now)-now)*1000)),
+            'radius': AIRSTRIKE_RADIUS,
+        }
+    return {
+        'lowGravity': now < low_until,
+        'lowGravityMs': max(0, int((low_until-now)*1000)),
+        'lowGravityWarningMs': max(0, int((warning_at-now)*1000)) if warning_at > now else 0,
+        'airstrike': public_air,
+    }
+
+
+def low_gravity_active(room, now=None):
+    now = time.monotonic() if now is None else now
+    return now < float(room.get('lowGravityUntil') or 0)
+
+
+def object_spec(obj):
+    return OBJECT_TYPES.get(str(obj.get('type') or ''), OBJECT_TYPES['cone'])
+
+
+def release_held_object(room, player, place=True):
+    object_id = player.get('heldObjectId')
+    player['heldObjectId'] = None
+    player['throwChargeStartedAt'] = 0.0
+    if not object_id:
+        return None
+    obj = room.get('physicsObjects', {}).get(object_id)
+    if not obj or obj.get('heldBy') != player.get('id'):
+        return None
+    obj['heldBy'] = None
+    obj['space'] = player.get('space','world')
+    facing = 1 if int(player.get('facing') or 1) >= 0 else -1
+    angle = float(player.get('direction') or (0 if facing >= 0 else math.pi))
+    if place:
+        placement = 82 if obj.get('type') == 'cart' else 58
+        obj['x'] = float(player.get('x') or 0) + math.cos(angle) * placement
+        obj['y'] = float(player.get('y') or 0) + math.sin(angle) * placement
+        obj['vx'] = float(player.get('vx') or 0) * 0.15
+        obj['vy'] = float(player.get('vy') or 0) * 0.15
+        obj['angularVelocity'] *= 0.25
+    obj['lastActiveAt'] = time.monotonic()
+    return obj
+
+
+def knock_player_down(room, target, duration, source_x, source_y, force=0.0):
+    now = time.monotonic()
+    if target.get('knockedOut') or now < float(target.get('downedImmunityUntil') or 0):
+        return False
+    carrier_id = target.get('carriedBy')
+    if carrier_id:
+        carrier = room.get('players', {}).get(carrier_id)
+        if carrier and carrier.get('carriedTargetId') == target.get('id'):
+            drop_carried_player(room, carrier)
+        else:
+            target['carriedBy'] = None
+    target['downedUntil'] = max(float(target.get('downedUntil') or 0), now + duration)
+    target['downedImmunityUntil'] = now + duration + 0.65
+    target['input'] = sanitize_input({})
+    target['moving'] = target['sprinting'] = target['parrying'] = False
+    target['parryUntil'] = 0
+    target['dashActive'] = False
+    target['dashAttackPending'] = False
+    target['moveVx'] = target['moveVy'] = 0
+    cancel_emote(target)
+    cancel_combo(room, target)
+    release_held_object(room, target, place=True)
+    drop_carried_player(room, target)
+    dismount_cart(room, target, knocked=True)
+    if force > 0:
+        angle = math.atan2(target['y'] - source_y, target['x'] - source_x)
+        target['impulseX'] += math.cos(angle) * force
+        target['impulseY'] += math.sin(angle) * force
+    return True
+
+
+def drop_carried_player(room, carrier):
+    target_id = carrier.get('carriedTargetId')
+    carrier['carriedTargetId'] = None
+    if not target_id:
+        return None
+    target = room.get('players', {}).get(target_id)
+    if not target or target.get('carriedBy') != carrier.get('id'):
+        return None
+    target['carriedBy'] = None
+    angle = float(carrier.get('direction') or 0)
+    target['x'] = clamp(carrier['x'] - math.cos(angle)*54, RADIUS, WORLD_W-RADIUS)
+    target['y'] = clamp(carrier['y'] - math.sin(angle)*54, RADIUS, WORLD_H-RADIUS)
+    target['downedImmunityUntil'] = max(float(target.get('downedImmunityUntil') or 0), time.monotonic()+0.7)
+    return target
+
+
+def dismount_cart(room, player, knocked=False):
+    cart_id = player.get('ridingCartId')
+    player['ridingCartId'] = None
+    if not cart_id:
+        return None
+    cart = room.get('physicsObjects', {}).get(cart_id)
+    if not cart or cart.get('riderId') != player.get('id'):
+        return None
+    cart['riderId'] = None
+    angle = float(cart.get('angle') or 0)
+    side = 1 if random.random() > .5 else -1
+    player['x'] = clamp(float(cart.get('x') or player['x']) + math.cos(angle+math.pi/2)*72*side, RADIUS, WORLD_W-RADIUS)
+    player['y'] = clamp(float(cart.get('y') or player['y']) + math.sin(angle+math.pi/2)*72*side, RADIUS, WORLD_H-RADIUS)
+    if knocked:
+        player['impulseX'] += math.cos(angle)*220
+        player['impulseY'] += math.sin(angle)*220
+    return cart
+
+
+def nearest_free_object(room, player, max_distance=PHYSICS_GRAB_RANGE):
+    best = None
+    best_distance = max_distance
+    for obj in room.get('physicsObjects', {}).values():
+        if obj.get('space','world') != player.get('space','world'):
+            continue
+        if obj.get('heldBy') and obj.get('type') != 'cart':
+            continue
+        distance = math.hypot(float(obj.get('x') or 0) - player['x'], float(obj.get('y') or 0) - player['y'])
+        if distance < best_distance:
+            best, best_distance = obj, distance
+    return best, best_distance
+
+
+async def physics_feedback(room, player, message, kind='info'):
+    await send(player['ws'], {'type':'physics-feedback','message':str(message)[:64],'kind':kind})
+
+
+async def physics_interact(room, player):
+    now = time.monotonic()
+    if player.get('knockedOut') or now < float(player.get('downedUntil') or 0) or now < float(player.get('stunnedUntil') or 0) or player.get('carriedBy'):
+        return
+    if player.get('ridingCartId'):
+        cart = dismount_cart(room, player)
+        if cart:
+            await broadcast(room, {'type':'physics-event','event':{'kind':'cart-dismount','playerId':player['id'],'objectId':cart['id'],'x':cart['x'],'y':cart['y']}}, space=player.get('space','world'))
+        return
+    if player.get('carriedTargetId'):
+        target = drop_carried_player(room, player)
+        if target:
+            await broadcast(room, {'type':'physics-event','event':{'kind':'carry-drop','playerId':player['id'],'targetId':target['id'],'x':target['x'],'y':target['y']}}, space=player.get('space','world'))
+        return
+    if player.get('heldObjectId'):
+        obj = release_held_object(room, player, place=True)
+        if obj:
+            await broadcast(room, {'type':'physics-event','event':{'kind':'placed','objectId':obj['id'],'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+        return
+    nearest_downed = None
+    nearest_distance = PHYSICS_HELP_RANGE
+    for other in connected(room, player.get('space','world')):
+        if other['id'] == player['id'] or other.get('knockedOut') or now >= float(other.get('downedUntil') or 0):
+            continue
+        distance = math.hypot(other['x'] - player['x'], other['y'] - player['y'])
+        if distance < nearest_distance:
+            nearest_downed, nearest_distance = other, distance
+    if nearest_downed:
+        nearest_downed['downedUntil'] = 0.0
+        nearest_downed['downedImmunityUntil'] = now + 0.8
+        nearest_downed['stunnedUntil'] = min(float(nearest_downed.get('stunnedUntil') or 0), now)
+        await broadcast(room, {'type':'physics-event','event':{'kind':'help-up','helperId':player['id'],'targetId':nearest_downed['id'],'x':nearest_downed['x'],'y':nearest_downed['y']-45}}, space=player.get('space','world'))
+        return
+    obj, distance = nearest_free_object(room, player)
+    if not obj:
+        await physics_feedback(room, player, 'Nothing close enough to grab.', 'range')
+        return
+    speed = math.hypot(float(obj.get('vx') or 0), float(obj.get('vy') or 0))
+    if speed > 420:
+        await physics_feedback(room, player, 'That object is moving too fast.', 'moving')
+        return
+    if obj.get('type') in ('grenade','gravity-grenade') and float(obj.get('fuseEnd') or 0) - now < 0.22:
+        await physics_feedback(room, player, 'Too late to grab it!', 'danger')
+        return
+    if obj.get('type') == 'cart':
+        angle = float(obj.get('angle') or 0)
+        rel = math.atan2(player['y']-obj['y'], player['x']-obj['x'])
+        behind = math.cos(rel-angle) < -0.15
+        if not obj.get('riderId') and not behind:
+            obj['riderId'] = player['id']
+            player['ridingCartId'] = obj['id']
+            player['input'] = sanitize_input({})
+            player['moveVx'] = player['moveVy'] = 0
+            cancel_combo(room, player)
+            cancel_emote(player)
+            await broadcast(room, {'type':'physics-event','event':{'kind':'cart-mount','playerId':player['id'],'objectId':obj['id'],'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+            return
+        if obj.get('heldBy') and obj.get('heldBy') != player['id']:
+            await physics_feedback(room, player, 'The cart is already being pushed. Approach the seat to ride.', 'cart')
+            return
+        if obj.get('riderId') and not behind:
+            await physics_feedback(room, player, 'The cart seat is occupied. Use the handle to push.', 'cart')
+            return
+    obj['heldBy'] = player['id']
+    obj['vx'] = obj['vy'] = obj['angularVelocity'] = 0.0
+    obj['space'] = player.get('space','world')
+    player['heldObjectId'] = obj['id']
+    player['throwChargeStartedAt'] = 0.0
+    cancel_combo(room, player)
+    cancel_emote(player)
+    await broadcast(room, {'type':'physics-event','event':{'kind':'grabbed','objectId':obj['id'],'playerId':player['id'],'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+
+
+async def physics_carry(room, player):
+    now = time.monotonic()
+    if player.get('knockedOut') or player.get('carriedBy') or player.get('ridingCartId') or player.get('heldObjectId') or now < float(player.get('downedUntil') or 0):
+        return
+    if player.get('carriedTargetId'):
+        target = drop_carried_player(room, player)
+        if target:
+            await broadcast(room, {'type':'physics-event','event':{'kind':'carry-drop','playerId':player['id'],'targetId':target['id'],'x':target['x'],'y':target['y']}}, space=player.get('space','world'))
+        return
+    nearest = None
+    best = CARRY_RANGE
+    for other in connected(room, player.get('space','world')):
+        if other['id'] == player['id'] or other.get('knockedOut') or other.get('carriedBy') or other.get('ridingCartId') or now >= float(other.get('downedUntil') or 0):
+            continue
+        distance = math.hypot(other['x']-player['x'], other['y']-player['y'])
+        if distance < best:
+            nearest, best = other, distance
+    if not nearest:
+        await physics_feedback(room, player, 'Move closer to a knocked-down player to carry them.', 'range')
+        return
+    nearest['carriedBy'] = player['id']
+    player['carriedTargetId'] = nearest['id']
+    nearest['input'] = sanitize_input({})
+    nearest['moveVx'] = nearest['moveVy'] = 0
+    cancel_combo(room, player)
+    cancel_emote(player)
+    await broadcast(room, {'type':'physics-event','event':{'kind':'carry-start','playerId':player['id'],'targetId':nearest['id'],'x':nearest['x'],'y':nearest['y']}}, space=player.get('space','world'))
+
+
+async def start_throw_charge(room, player):
+    now = time.monotonic()
+    if not player.get('heldObjectId') or player.get('knockedOut') or now < float(player.get('downedUntil') or 0):
+        return
+    obj = room.get('physicsObjects', {}).get(player.get('heldObjectId'))
+    if not obj or obj.get('type') == 'cart':
+        return
+    player['throwChargeStartedAt'] = now
+
+
+async def throw_held_object(room, player):
+    now = time.monotonic()
+    object_id = player.get('heldObjectId')
+    obj = room.get('physicsObjects', {}).get(object_id)
+    if not obj or obj.get('heldBy') != player['id']:
+        player['heldObjectId'] = None
+        player['throwChargeStartedAt'] = 0.0
+        return
+    if obj.get('type') == 'cart':
+        await physics_feedback(room, player, 'Use E to stop pushing the cart.', 'cart')
+        return
+    charge_started = float(player.get('throwChargeStartedAt') or now)
+    charge = clamp((now - charge_started) / PHYSICS_THROW_CHARGE_MAX, 0, 1)
+    power = PHYSICS_THROW_MIN + (PHYSICS_THROW_MAX - PHYSICS_THROW_MIN) * (charge ** 0.72)
+    if low_gravity_active(room, now):
+        power *= 1.38
+    spec = object_spec(obj)
+    angle = float(player.get('direction') or (0 if player.get('facing',1) >= 0 else math.pi))
+    obj['heldBy'] = None
+    obj['x'] = player['x'] + math.cos(angle) * 60
+    obj['y'] = player['y'] + math.sin(angle) * 60
+    obj['vx'] = math.cos(angle) * power * spec['throw'] + float(player.get('vx') or 0) * 0.30
+    obj['vy'] = math.sin(angle) * power * spec['throw'] + float(player.get('vy') or 0) * 0.30
+    obj['angularVelocity'] = (5.5 + charge * 10.0) * (1 if random.random() > .5 else -1)
+    obj['lastThrower'] = player['id']
+    obj['ownerImmuneUntil'] = now + 0.30
+    obj['lastActiveAt'] = now
+    player['heldObjectId'] = None
+    player['throwChargeStartedAt'] = 0.0
+    await broadcast(room, {'type':'physics-event','event':{'kind':'thrown','objectId':obj['id'],'playerId':player['id'],'charge':round(charge,3),'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+
+
+async def kick_object(room, player):
+    now = time.monotonic()
+    if player.get('knockedOut') or now < float(player.get('downedUntil') or 0) or now < float(player.get('kickReadyAt') or 0) or player.get('heldObjectId'):
+        return
+    obj, distance = nearest_free_object(room, player, PHYSICS_KICK_RANGE)
+    if not obj:
+        await physics_feedback(room, player, 'Move closer to an object to kick it.', 'range')
+        return
+    angle = math.atan2(obj['y'] - player['y'], obj['x'] - player['x']) if distance > 1 else float(player.get('direction') or 0)
+    spec = object_spec(obj)
+    force = 690 * spec['kick']
+    obj['vx'] += math.cos(angle) * force
+    obj['vy'] += math.sin(angle) * force
+    obj['angularVelocity'] += (8.0 / max(.35, spec['mass'])) * (1 if random.random() > .5 else -1)
+    obj['lastThrower'] = player['id']
+    obj['ownerImmuneUntil'] = now + 0.20
+    obj['lastActiveAt'] = now
+    player['kickReadyAt'] = now + 0.48
+    await broadcast(room, {'type':'physics-event','event':{'kind':'kicked','objectId':obj['id'],'playerId':player['id'],'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+
+
+async def use_knockback_grenade(room, player):
+    now = time.monotonic()
+    if player.get('knockedOut') or now < float(player.get('downedUntil') or 0) or now < float(player.get('grenadeReadyAt') or 0):
+        return
+    count = int(player.get('grenadeCount') or 0)
+    if count <= 0:
+        await physics_feedback(room, player, 'Buy a knockback grenade in the Chaos Shop.', 'empty')
+        return
+    room['physicsSerial'] = int(room.get('physicsSerial') or 0) + 1
+    object_id = f"grenade-{room['physicsSerial']}"
+    angle = float(player.get('direction') or (0 if player.get('facing',1) >= 0 else math.pi))
+    obj = make_physics_object(object_id, 'grenade', player['x'] + math.cos(angle)*58, player['y'] + math.sin(angle)*58)
+    obj['vx'] = math.cos(angle) * 660 + float(player.get('vx') or 0) * .3
+    obj['vy'] = math.sin(angle) * 660 + float(player.get('vy') or 0) * .3
+    obj['angularVelocity'] = 11.0
+    obj['fuseEnd'] = now + GRENADE_FUSE
+    obj['lastThrower'] = player['id']
+    obj['ownerImmuneUntil'] = now + .28
+    room['physicsObjects'][object_id] = obj
+    player['grenadeCount'] = count - 1
+    player['grenadeReadyAt'] = now + GRENADE_COOLDOWN
+    await send(player['ws'], {'type':'grenade-count','count':player['grenadeCount']})
+    await broadcast(room, {'type':'physics-event','event':{'kind':'grenade-thrown','objectId':object_id,'playerId':player['id'],'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+
+
+async def use_gravity_grenade(room, player):
+    now = time.monotonic()
+    if player.get('knockedOut') or now < float(player.get('downedUntil') or 0) or now < float(player.get('grenadeReadyAt') or 0):
+        return
+    count = int(player.get('gravityGrenadeCount') or 0)
+    if count <= 0:
+        await physics_feedback(room, player, 'Buy a gravity grenade in the Chaos Shop.', 'empty')
+        return
+    room['physicsSerial'] = int(room.get('physicsSerial') or 0) + 1
+    object_id = f"gravity-{room['physicsSerial']}"
+    angle = float(player.get('direction') or (0 if player.get('facing',1) >= 0 else math.pi))
+    obj = make_physics_object(object_id, 'gravity-grenade', player['x'] + math.cos(angle)*58, player['y'] + math.sin(angle)*58)
+    speed = 610 * (1.28 if low_gravity_active(room, now) else 1.0)
+    obj['vx'] = math.cos(angle) * speed + float(player.get('vx') or 0) * .3
+    obj['vy'] = math.sin(angle) * speed + float(player.get('vy') or 0) * .3
+    obj['angularVelocity'] = -12.0
+    obj['fuseEnd'] = now + GRAVITY_GRENADE_FUSE
+    obj['fieldEnd'] = obj['fuseEnd'] + GRAVITY_FIELD_DURATION
+    obj['lastThrower'] = player['id']
+    obj['ownerImmuneUntil'] = now + .25
+    room['physicsObjects'][object_id] = obj
+    player['gravityGrenadeCount'] = count - 1
+    player['grenadeReadyAt'] = now + GRENADE_COOLDOWN
+    await send(player['ws'], {'type':'chaos-counts','grenadeCount':int(player.get('grenadeCount') or 0),'gravityGrenadeCount':player['gravityGrenadeCount'],'airstrikeCount':int(player.get('airstrikeCount') or 0)})
+    await broadcast(room, {'type':'physics-event','event':{'kind':'gravity-thrown','objectId':object_id,'playerId':player['id'],'x':obj['x'],'y':obj['y']}}, space=player.get('space','world'))
+
+
+def apply_blast(room, x, y, radius, player_force, object_force, space='world', knock_radius=260, source_kind='blast'):
+    now = time.monotonic()
+    gravity_mult = 1.30 if low_gravity_active(room, now) else 1.0
+    for player in connected(room, space):
+        dx, dy = player['x']-x, player['y']-y
+        distance = math.hypot(dx, dy)
+        if distance > radius:
+            continue
+        if distance < 1: dx,dy,distance=1,0,1
+        falloff = 1-distance/radius
+        force = player_force * gravity_mult * (.24+falloff*.76)
+        player['impulseX'] += dx/distance*force
+        player['impulseY'] += dy/distance*force
+        if distance < knock_radius:
+            knock_player_down(room, player, 1.35+falloff*.75, x, y, force=70)
+    for other in room.get('physicsObjects', {}).values():
+        if other.get('heldBy') or other.get('space','world') != space:
+            continue
+        dx,dy=other['x']-x,other['y']-y
+        distance=math.hypot(dx,dy)
+        if distance > radius or distance < .5:
+            continue
+        falloff=1-distance/radius
+        spec=object_spec(other)
+        force=object_force*gravity_mult*(.22+falloff*.78)/max(.45,spec['mass']**.55)
+        other['vx'] += dx/distance*force
+        other['vy'] += dy/distance*force
+        other['angularVelocity'] += random.uniform(-14,14)*(0.5+falloff)
+        other['lastActiveAt']=now
+    if math.hypot(TABLE_X-x,TABLE_Y-y) < radius*.78:
+        break_table(room,TABLE_X,TABLE_Y,source_kind)
+
+
+async def run_airstrike(room, serial):
+    air = room.get('airstrike')
+    if not air or int(air.get('serial') or 0) != serial:
+        return
+    delay=max(0,float(air['impactAt'])-time.monotonic())
+    await asyncio.sleep(delay)
+    offsets=[(0,0),(-170,-95),(175,80),(-80,185),(105,-190),(225,-40)]
+    for index,(ox,oy) in enumerate(offsets[:AIRSTRIKE_IMPACTS]):
+        air=room.get('airstrike')
+        if not air or int(air.get('serial') or 0)!=serial:
+            return
+        x=clamp(float(air['x'])+ox,WORLD_W*.02,WORLD_W*.98)
+        y=clamp(float(air['y'])+oy,WORLD_H*.02,WORLD_H*.98)
+        apply_blast(room,x,y,AIRSTRIKE_RADIUS*.62,1450,1820,'world',300,'airstrike')
+        await broadcast(room,{'type':'physics-event','event':{'kind':'airstrike-impact','serial':serial,'index':index,'x':x,'y':y,'radius':AIRSTRIKE_RADIUS*.62}},space='world')
+        await asyncio.sleep(.24)
+    air=room.get('airstrike')
+    if air and int(air.get('serial') or 0)==serial:
+        room['airstrike']=None
+        await broadcast(room,{'type':'chaos-state','chaos':public_chaos_state(room)},space='world')
+
+
+async def target_airstrike(room, player, x, y):
+    now=time.monotonic()
+    if player.get('space','world')!='world' or player.get('knockedOut') or now < float(player.get('downedUntil') or 0):
+        return
+    count=int(player.get('airstrikeCount') or 0)
+    if count<=0:
+        await physics_feedback(room,player,'Buy an airstrike phone in the Chaos Shop.','empty')
+        return
+    if room.get('airstrike'):
+        await physics_feedback(room,player,'An airstrike is already active.','busy')
+        return
+    if now < float(room.get('airstrikeReadyAt') or 0):
+        await physics_feedback(room,player,'Airstrike system is reloading.','cooldown')
+        return
+    try:
+        tx=clamp(float(x or 0),120,WORLD_W-120); ty=clamp(float(y or 0),120,WORLD_H-120)
+    except (TypeError, ValueError):
+        await physics_feedback(room,player,'Invalid airstrike target.','invalid')
+        return
+    if math.hypot(tx-SPAWN_X,ty-SPAWN_Y)<560:
+        await physics_feedback(room,player,'The spawn area is protected. Pick another target.','protected')
+        return
+    serial=int(room.get('airstrikeSerial') or 0)+1
+    room['airstrikeSerial']=serial
+    room['airstrikeReadyAt']=now+AIRSTRIKE_COOLDOWN
+    room['airstrike']={'serial':serial,'x':tx,'y':ty,'ownerId':player['id'],'startedAt':now,'impactAt':now+AIRSTRIKE_WARNING,'endAt':now+AIRSTRIKE_WARNING+2.2}
+    player['airstrikeCount']=count-1
+    await send(player['ws'],{'type':'chaos-counts','grenadeCount':int(player.get('grenadeCount') or 0),'gravityGrenadeCount':int(player.get('gravityGrenadeCount') or 0),'airstrikeCount':player['airstrikeCount']})
+    await broadcast(room,{'type':'chaos-state','chaos':public_chaos_state(room)},space='world')
+    await broadcast(room,{'type':'physics-event','event':{'kind':'airstrike-targeted','serial':serial,'ownerId':player['id'],'x':tx,'y':ty,'radius':AIRSTRIKE_RADIUS,'warningMs':int(AIRSTRIKE_WARNING*1000)}},space='world')
+    asyncio.create_task(run_airstrike(room,serial))
+
+
+def release_gravity_grenade(room, object_id, now):
+    obj=room.get('physicsObjects',{}).pop(object_id,None)
+    if not obj:
+        return
+    x,y=float(obj.get('x') or 0),float(obj.get('y') or 0)
+    held_by=obj.get('heldBy')
+    if held_by:
+        holder=room.get('players',{}).get(held_by)
+        if holder and holder.get('heldObjectId')==object_id:
+            holder['heldObjectId']=None; holder['throwChargeStartedAt']=0.0
+            x,y=holder['x'],holder['y']
+    apply_blast(room,x,y,GRAVITY_FIELD_RADIUS*.86,GRAVITY_RELEASE_FORCE,GRAVITY_RELEASE_FORCE*1.15,obj.get('space','world'),205,'gravity-release')
+    asyncio.create_task(broadcast(room,{'type':'physics-event','event':{'kind':'gravity-release','x':x,'y':y,'radius':GRAVITY_FIELD_RADIUS}},space=obj.get('space','world')))
+
+
+def break_table(room, x, y, cause='impact'):
+    now = time.monotonic()
+    table = room.setdefault('physicsTable', {'brokenUntil':0.0,'serial':0})
+    if now < float(table.get('brokenUntil') or 0):
+        return False
+    table['brokenUntil'] = now + TABLE_RESPAWN
+    table['serial'] = int(table.get('serial') or 0) + 1
+    asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'table-break','x':x,'y':y,'cause':cause,'serial':table['serial']}}, space='world'))
+    return True
+
+
+def explode_grenade(room, object_id, now):
+    obj = room.get('physicsObjects', {}).pop(object_id, None)
+    if not obj:
+        return
+    x, y = float(obj.get('x') or 0), float(obj.get('y') or 0)
+    held_by = obj.get('heldBy')
+    if held_by:
+        holder = room.get('players', {}).get(held_by)
+        if holder and holder.get('heldObjectId') == object_id:
+            holder['heldObjectId'] = None
+            holder['throwChargeStartedAt'] = 0.0
+            x, y = float(holder.get('x') or x), float(holder.get('y') or y)
+    apply_blast(room, x, y, GRENADE_RADIUS, 1180, 1400, obj.get('space','world'), 245, 'grenade')
+    asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'grenade-explode','x':x,'y':y,'radius':GRENADE_RADIUS}}, space=obj.get('space','world')))
+
+
+def circle_hits_table(x, y, radius):
+    nearest_x = clamp(x, TABLE_X - TABLE_W/2, TABLE_X + TABLE_W/2)
+    nearest_y = clamp(y, TABLE_Y - TABLE_H/2, TABLE_Y + TABLE_H/2)
+    return math.hypot(x-nearest_x, y-nearest_y) <= radius
+
+
+def simulate_physics(room, dt, now):
+    objects = room.get('physicsObjects', {})
+    table = room.setdefault('physicsTable', {'brokenUntil':0.0,'serial':0})
+    if table.get('brokenUntil') and now >= float(table.get('brokenUntil') or 0):
+        table['brokenUntil'] = 0.0
+        table['serial'] = int(table.get('serial') or 0) + 1
+        asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'table-respawn','x':TABLE_X,'y':TABLE_Y,'serial':table['serial']}}, space='world'))
+    explode_ids = []
+    for obj in list(objects.values()):
+        if obj.get('type') == 'grenade' and now >= float(obj.get('fuseEnd') or 0):
+            explode_ids.append(obj['id'])
+            continue
+        if obj.get('type') == 'gravity-grenade' and now >= float(obj.get('fieldEnd') or 0):
+            explode_ids.append(obj['id'])
+            continue
+        held_by = obj.get('heldBy')
+        if held_by and obj.get('type') == 'gravity-grenade' and now >= float(obj.get('fuseEnd') or 0):
+            holder = room['players'].get(held_by)
+            if holder:
+                release_held_object(room, holder, place=True)
+            else:
+                obj['heldBy'] = None
+            held_by = None
+        if held_by:
+            holder = room['players'].get(held_by)
+            if not holder or not holder.get('connected') or holder.get('space','world') != obj.get('space','world') or holder.get('knockedOut') or now < float(holder.get('downedUntil') or 0):
+                if holder:
+                    release_held_object(room, holder, place=True)
+                else:
+                    obj['heldBy'] = None
+                continue
+            angle = float(holder.get('direction') or (0 if holder.get('facing',1) >= 0 else math.pi))
+            hold_distance = 86 if obj.get('type') == 'cart' else 52
+            obj['x'] = holder['x'] + math.cos(angle) * hold_distance
+            obj['y'] = holder['y'] + math.sin(angle) * hold_distance
+            obj['angle'] = angle if obj.get('type') == 'cart' else angle + math.pi * .5
+            obj['vx'] = obj['vy'] = obj['angularVelocity'] = 0.0
+            continue
+        spec = object_spec(obj)
+        if obj.get('type') == 'grenade' and now >= float(obj.get('fuseEnd') or 0):
+            explode_ids.append(obj['id'])
+            continue
+        if obj.get('type') == 'gravity-grenade' and now >= float(obj.get('fieldEnd') or 0):
+            explode_ids.append(obj['id'])
+            continue
+        if obj.get('type') == 'gravity-grenade' and now >= float(obj.get('fuseEnd') or 0):
+            obj['vx'] *= math.exp(-9*dt); obj['vy'] *= math.exp(-9*dt); obj['angularVelocity'] *= math.exp(-8*dt)
+            x,y=float(obj['x']),float(obj['y'])
+            if not obj.get('fieldStarted'):
+                obj['fieldStarted'] = True
+                asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'gravity-field-start','objectId':obj['id'],'x':x,'y':y,'radius':GRAVITY_FIELD_RADIUS,'durationMs':int(GRAVITY_FIELD_DURATION*1000)}}, space=obj.get('space','world')))
+            for target in connected(room,obj.get('space','world')):
+                if target.get('knockedOut') or target.get('carriedBy'):
+                    continue
+                dx,dy=x-target['x'],y-target['y']; distance=math.hypot(dx,dy)
+                if .5 < distance < GRAVITY_FIELD_RADIUS:
+                    falloff=1-distance/GRAVITY_FIELD_RADIUS
+                    force=GRAVITY_PULL*(.20+falloff*.80)*dt
+                    target['impulseX'] += dx/distance*force
+                    target['impulseY'] += dy/distance*force
+            for other in objects.values():
+                if other is obj or other.get('heldBy') or other.get('space','world')!=obj.get('space','world'):
+                    continue
+                dx,dy=x-other['x'],y-other['y']; distance=math.hypot(dx,dy)
+                if .5 < distance < GRAVITY_FIELD_RADIUS:
+                    falloff=1-distance/GRAVITY_FIELD_RADIUS
+                    force=GRAVITY_PULL*1.35*(.18+falloff*.82)*dt/max(.45,object_spec(other)['mass']**.45)
+                    other['vx'] += dx/distance*force
+                    other['vy'] += dy/distance*force
+                    other['angularVelocity'] += math.sin(now*8+distance*.02)*dt*4
+            continue
+        speed = math.hypot(float(obj.get('vx') or 0), float(obj.get('vy') or 0))
+        if speed > 2:
+            obj['lastActiveAt'] = now
+        old_x, old_y = obj['x'], obj['y']
+        nx = clamp(old_x + obj['vx'] * dt, spec['radius'], WORLD_W - spec['radius'])
+        ny = clamp(old_y + obj['vy'] * dt, spec['radius'], WORLD_H - spec['radius'])
+        collided = False
+        if is_position_blocked(nx, old_y, spec['radius']):
+            collided = True
+            obj['vx'] *= -spec['bounce']
+        else:
+            obj['x'] = nx
+        if is_position_blocked(obj['x'], ny, spec['radius']):
+            collided = True
+            obj['vy'] *= -spec['bounce']
+        else:
+            obj['y'] = ny
+        if obj['x'] <= spec['radius'] + .1 or obj['x'] >= WORLD_W - spec['radius'] - .1:
+            obj['vx'] *= -spec['bounce']
+        if obj['y'] <= spec['radius'] + .1 or obj['y'] >= WORLD_H - spec['radius'] - .1:
+            obj['vy'] *= -spec['bounce']
+        table_broken = now < float(table.get('brokenUntil') or 0)
+        if not table_broken and circle_hits_table(obj['x'], obj['y'], spec['radius']):
+            impact_speed = math.hypot(obj['vx'], obj['vy'])
+            if impact_speed > (390 if obj.get('type') in ('chair','trashcan','grenade') else 610):
+                break_table(room, obj['x'], obj['y'], obj.get('type','impact'))
+            else:
+                if abs(old_x - TABLE_X) > abs(old_y - TABLE_Y): obj['vx'] *= -spec['bounce']
+                else: obj['vy'] *= -spec['bounce']
+                obj['x'], obj['y'] = old_x, old_y
+        if obj.get('type') == 'cart' and collided and speed > CART_CRASH_SPEED and obj.get('riderId') and now-float(obj.get('lastCollisionAt') or 0)>.8:
+            rider=room.get('players',{}).get(obj.get('riderId'))
+            obj['lastCollisionAt']=now
+            if rider:
+                dismount_cart(room,rider,knocked=True)
+                knock_player_down(room,rider,1.55,obj['x']-obj['vx']*.05,obj['y']-obj['vy']*.05,force=110)
+                asyncio.create_task(broadcast(room,{'type':'physics-event','event':{'kind':'cart-crash','objectId':obj['id'],'playerId':rider['id'],'x':obj['x'],'y':obj['y']}},space=obj.get('space','world')))
+        friction = spec['friction'] * (.46 if low_gravity_active(room, now) else 1.0)
+        linear_decay = math.exp(-friction * dt)
+        obj['vx'] *= linear_decay
+        obj['vy'] *= linear_decay
+        obj['angularVelocity'] *= math.exp(-2.6 * dt)
+        obj['angle'] = (float(obj.get('angle') or 0) + float(obj.get('angularVelocity') or 0) * dt) % math.tau
+        if abs(obj['vx']) < 2.5: obj['vx'] = 0.0
+        if abs(obj['vy']) < 2.5: obj['vy'] = 0.0
+        # Reset abandoned props so the playground cannot be emptied permanently.
+        if obj.get('type') not in ('grenade','gravity-grenade') and not obj.get('riderId') and now - float(obj.get('lastActiveAt') or now) > PHYSICS_OBJECT_RESET_TIME:
+            if math.hypot(obj['x']-obj['spawnX'], obj['y']-obj['spawnY']) > 260:
+                obj['x'], obj['y'] = obj['spawnX'], obj['spawnY']
+                obj['vx'] = obj['vy'] = obj['angularVelocity'] = 0.0
+                obj['lastThrower'] = None
+                obj['lastActiveAt'] = now
+        speed = math.hypot(obj['vx'], obj['vy'])
+        if speed > 130:
+            hits = obj.setdefault('lastHitAt', {})
+            for target in connected(room, obj.get('space','world')):
+                if target.get('knockedOut'):
+                    continue
+                if target['id'] == obj.get('lastThrower') and now < float(obj.get('ownerImmuneUntil') or 0):
+                    continue
+                if now - float(hits.get(target['id']) or 0) < .48:
+                    continue
+                dx, dy = target['x'] - obj['x'], target['y'] - obj['y']
+                distance = math.hypot(dx, dy)
+                if distance > spec['radius'] + RADIUS * .78:
+                    continue
+                hits[target['id']] = now
+                if distance < 1: dx,dy,distance=1,0,1
+                force = min(610, speed * (0.42 / max(.38, spec['mass'] ** .30)))
+                target['impulseX'] += dx/distance * force
+                target['impulseY'] += dy/distance * force
+                if speed >= spec['downSpeed']:
+                    knock_player_down(room, target, 1.45 + min(.75, speed/1400), obj['x'], obj['y'], force=55)
+                    state = 'down'
+                elif speed >= spec['stunSpeed']:
+                    target['stunnedUntil'] = max(float(target.get('stunnedUntil') or 0), now + .24)
+                    state = 'hit'
+                else:
+                    state = 'bump'
+                obj['vx'] *= -0.32
+                obj['vy'] *= -0.32
+                asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'object-hit','objectId':obj['id'],'objectType':obj['type'],'targetId':target['id'],'state':state,'speed':round(speed,1),'x':target['x'],'y':target['y']-42}}, space=obj.get('space','world')))
+                break
+        if obj.get('type') == 'basketball' and now - float(obj.get('scoredAt') or 0) > 1.0:
+            if math.hypot(obj['x']-HOOP_X, obj['y']-HOOP_Y) < 34 and speed > 120:
+                obj['scoredAt'] = now
+                obj['vx'] *= .52
+                obj['vy'] *= .52
+                asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'basket-score','objectId':obj['id'],'x':HOOP_X,'y':HOOP_Y}}, space='world'))
+    # Server-side object-to-object collisions make piles, cart crashes and blasts coherent for everyone.
+    free_objects=[o for o in objects.values() if not o.get('heldBy') and o.get('type') not in ('gravity-grenade',)]
+    for i,a in enumerate(free_objects):
+        for b in free_objects[i+1:]:
+            if a.get('space','world')!=b.get('space','world'):
+                continue
+            sa,sb=object_spec(a),object_spec(b)
+            dx,dy=b['x']-a['x'],b['y']-a['y']; distance=math.hypot(dx,dy); minimum=sa['radius']+sb['radius']
+            if distance<=.01 or distance>=minimum:
+                continue
+            nx,ny=dx/distance,dy/distance; overlap=minimum-distance
+            total=max(.1,sa['mass']+sb['mass'])
+            a['x']-=nx*overlap*(sb['mass']/total); a['y']-=ny*overlap*(sb['mass']/total)
+            b['x']+=nx*overlap*(sa['mass']/total); b['y']+=ny*overlap*(sa['mass']/total)
+            relative=(b['vx']-a['vx'])*nx+(b['vy']-a['vy'])*ny
+            if relative<0:
+                restitution=min(.72,(sa['bounce']+sb['bounce'])*.55)
+                impulse=-(1+restitution)*relative/(1/max(.1,sa['mass'])+1/max(.1,sb['mass']))
+                a['vx']-=impulse*nx/max(.1,sa['mass']); a['vy']-=impulse*ny/max(.1,sa['mass'])
+                b['vx']+=impulse*nx/max(.1,sb['mass']); b['vy']+=impulse*ny/max(.1,sb['mass'])
+                a['angularVelocity']+=random.uniform(-2.5,2.5); b['angularVelocity']+=random.uniform(-2.5,2.5)
+    for obj in objects.values():
+        if obj.get('type')=='cart' and obj.get('riderId'):
+            rider=room.get('players',{}).get(obj.get('riderId'))
+            if not rider or not rider.get('connected') or rider.get('knockedOut'):
+                if rider: dismount_cart(room,rider)
+                else: obj['riderId']=None
+            else:
+                rider['x']=obj['x']; rider['y']=obj['y']-8; rider['direction']=float(obj.get('angle') or 0); rider['facing']=1 if math.cos(rider['direction'])>=0 else -1
+                rider['vx']=obj['vx']; rider['vy']=obj['vy']; rider['moveVx']=rider['moveVy']=0; rider['moving']=math.hypot(obj['vx'],obj['vy'])>8
+    for object_id in explode_ids:
+        obj=objects.get(object_id)
+        if obj and obj.get('type')=='gravity-grenade':
+            release_gravity_grenade(room,object_id,now)
+        else:
+            explode_grenade(room, object_id, now)
+
+
 def make_room(code):
     return {
         'code': code,
@@ -517,6 +1307,11 @@ def make_room(code):
         'avatars': {},
         'loadouts': {},
         'boomboxes': {},
+        'physicsObjects': create_world_objects(),
+        'physicsTable': {'brokenUntil': 0.0, 'serial': 0},
+        'physicsSerial': 0,
+        'airstrike': None, 'airstrikeSerial': 0, 'airstrikeReadyAt': 0.0,
+        'lowGravityUntil': 0.0, 'lowGravityWarningAt': 0.0, 'lowGravityWasActive': False, 'nextLowGravityAt': time.monotonic()+LOW_GRAVITY_FIRST_DELAY,
         'createdAt': time.time(),
     }
 
@@ -535,6 +1330,10 @@ def make_player(name, profile, progress, inventory, loadout, session, character_
         'moving': False, 'sprinting': False, 'blocking': False, 'parrying': False,
         'stamina': STAMINA_MAX, 'lastStaminaUseAt': 0,
         'score': 0, 'knockedOut': False, 'respawnAt': 0,
+        'downedUntil': 0.0, 'downedImmunityUntil': 0.0,
+        'heldObjectId': None, 'throwChargeStartedAt': 0.0, 'kickReadyAt': 0.0,
+        'grenadeCount': 1, 'gravityGrenadeCount': 0, 'airstrikeCount': 0, 'grenadeReadyAt': 0.0,
+        'ridingCartId': None, 'carriedTargetId': None, 'carriedBy': None,
         'lastPunchAt': -10, 'attackRecoveryUntil': 0,
         'attackHand': 'right', 'attackAngle': 0, 'attackKind': 'jab',
         'impulseX': 0, 'impulseY': 0,
@@ -631,6 +1430,15 @@ def public_player(player):
     result['parrying'] = now < float(player.get('parryUntil') or 0)
     result['stunned'] = now < float(player.get('stunnedUntil') or 0)
     result['comboLocked'] = bool(player.get('comboOwner')) and now < float(player.get('stunnedUntil') or 0)
+    result['downed'] = now < float(player.get('downedUntil') or 0)
+    result['downedRemainingMs'] = max(0, int((float(player.get('downedUntil') or 0) - now) * 1000))
+    result['heldObjectId'] = player.get('heldObjectId')
+    result['grenadeCount'] = int(player.get('grenadeCount') or 0)
+    result['gravityGrenadeCount'] = int(player.get('gravityGrenadeCount') or 0)
+    result['airstrikeCount'] = int(player.get('airstrikeCount') or 0)
+    result['ridingCartId'] = player.get('ridingCartId')
+    result['carriedTargetId'] = player.get('carriedTargetId')
+    result['carriedBy'] = player.get('carriedBy')
     result['parryLocked'] = bool(player.get('comboOwner'))
     result['chainReady'] = bool(player.get('attackHitConfirmed')) and not bool(player.get('chainLocked')) and not bool(player.get('attackQueued')) and now >= float(player.get('attackQueueOpenAt') or 0) and now <= float(player.get('attackQueueCloseAt') or 0)
     result['attackQueued'] = bool(player.get('attackQueued'))
@@ -846,6 +1654,10 @@ async def snapshot(room):
                 owner_id: state for owner_id in room.get('boomboxes', {})
                 if (state := public_boombox(room, owner_id)) and state.get('space') == receiver.get('space','world')
             },
+            'objects': {object_id: public_physics_object(obj) for object_id, obj in room.get('physicsObjects', {}).items() if obj.get('space','world') == receiver.get('space','world')},
+            'table': public_table(room),
+            'hoop': {'x': HOOP_X, 'y': HOOP_Y},
+            'chaos': public_chaos_state(room),
         })
 
 async def send_world(room, ws=None):
@@ -865,6 +1677,10 @@ async def send_world(room, ws=None):
                 owner_id: state for owner_id in room.get('boomboxes', {})
                 if (state := public_boombox(room, owner_id)) and state.get('space') == player.get('space','world')
             },
+            'objects': {object_id: public_physics_object(obj) for object_id, obj in room.get('physicsObjects', {}).items() if obj.get('space','world') == player.get('space','world')},
+            'table': public_table(room),
+            'chaos': public_chaos_state(room),
+            'hoop': {'x': HOOP_X, 'y': HOOP_Y},
         }
         if player.get('space','world').startswith('room:'):
             owner_id = player.get('roomOwner') or player.get('space','world').split(':',1)[1]
@@ -893,6 +1709,13 @@ def nearest(room, attacker, max_distance):
 
 
 def release(room, player):
+    release_held_object(room, player, place=True)
+    drop_carried_player(room, player)
+    dismount_cart(room, player)
+    if player.get('carriedBy'):
+        carrier=room.get('players',{}).get(player.get('carriedBy'))
+        if carrier and carrier.get('carriedTargetId')==player['id']: carrier['carriedTargetId']=None
+        player['carriedBy']=None
     if player.get('comboTarget'):
         cancel_combo(room, player, release_target=True)
     if player.get('comboOwner'):
@@ -1129,6 +1952,8 @@ async def grant(player, xp=0, coins=0, reputation=0, reason=''):
 
 
 def knockout(room, target, attacker):
+    release_held_object(room, target, place=True)
+    target['downedUntil'] = 0.0
     target['knockedOut'] = True
     target['respawnAt'] = time.monotonic() + KO_TIME
     target['blocking'] = target['sprinting'] = target['parrying'] = False
@@ -1169,6 +1994,10 @@ def respawn(player):
     player['health'] = player['maxHealth']
     player['stamina'] = STAMINA_MAX
     player['knockedOut'] = False
+    player['downedUntil'] = 0.0
+    player['downedImmunityUntil'] = time.monotonic() + 0.75
+    player['heldObjectId'] = None
+    player['throwChargeStartedAt'] = 0.0
     player['respawnAt'] = 0
     player['blocking'] = player['sprinting'] = player['parrying'] = False
     player['dashActive'] = False
@@ -1231,7 +2060,7 @@ async def parry(room, player):
     if player.get('comboOwner'):
         await combat_feedback(player, 'Parry before the first hit', 'parry-locked')
         return
-    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or player.get('comboTarget') or player.get('dashActive'):
+    if player.get('knockedOut') or now < float(player.get('downedUntil') or 0) or player.get('heldObjectId') or player.get('ridingCartId') or player.get('carriedTargetId') or player.get('carriedBy') or now < float(player.get('stunnedUntil') or 0) or player.get('comboTarget') or player.get('dashActive'):
         return
     if now < float(player.get('parryReadyAt') or 0):
         return
@@ -1250,7 +2079,7 @@ async def parry(room, player):
 
 async def dash(room, player, raw_x=0, raw_y=0):
     now = time.monotonic()
-    if player.get('knockedOut') or now < float(player.get('stunnedUntil') or 0) or now < float(player.get('parryRecoveryUntil') or 0) or player.get('comboTarget'):
+    if player.get('knockedOut') or now < float(player.get('downedUntil') or 0) or player.get('heldObjectId') or player.get('ridingCartId') or player.get('carriedTargetId') or player.get('carriedBy') or now < float(player.get('stunnedUntil') or 0) or now < float(player.get('parryRecoveryUntil') or 0) or player.get('comboTarget'):
         return
     if player.get('dashActive') or now < float(player.get('dashReadyAt') or 0):
         return
@@ -1531,7 +2360,7 @@ async def resolve_manual_attack(room, attacker_id, token_value, action_serial, s
 
 async def start_attack(room, attacker, dash_attack=False, from_queue=False):
     now = time.monotonic()
-    if attacker.get('knockedOut') or now < float(attacker.get('stunnedUntil') or 0) or now < float(attacker.get('parryRecoveryUntil') or 0):
+    if attacker.get('knockedOut') or now < float(attacker.get('downedUntil') or 0) or attacker.get('heldObjectId') or attacker.get('ridingCartId') or attacker.get('carriedTargetId') or attacker.get('carriedBy') or now < float(attacker.get('stunnedUntil') or 0) or now < float(attacker.get('parryRecoveryUntil') or 0):
         return
     if attacker.get('comboOwner'):
         return
@@ -1662,6 +2491,7 @@ async def enter_personal_room(room, player, owner_id):
         return
     owner_name = owner['name'] if owner else clean_name(stored.get('name') or 'Friend')
     release(room, player)
+    release_held_object(room, player, place=True)
     player['space'] = f'room:{owner_id}'
     player['roomOwner'] = owner_id
     player['x'], player['y'] = 460, 350
@@ -1675,6 +2505,7 @@ async def enter_personal_room(room, player, owner_id):
 
 async def leave_personal_room(room, player):
     release(room, player)
+    release_held_object(room, player, place=True)
     player['space'] = 'world'; player['roomOwner'] = None
     player['x'], player['y'] = ROOM_DOOR[0], ROOM_DOOR[1]-100
     if player['id'] in room.get('boomboxes', {}):
@@ -1685,10 +2516,31 @@ async def leave_personal_room(room, player):
     await send_world(room, player['ws']); await snapshot(room)
 
 async def interact(room, player):
-    return
+    await physics_interact(room, player)
 
 async def buy_item(room, player, item_id):
-    await send(player['ws'], {'type':'purchase-result','ok':False,'message':'The shop was removed.'})
+    item_id=str(item_id or '')
+    catalog={
+        'knockback-grenade':('grenadeCount',GRENADE_MAX,GRENADE_COST,'Knockback grenade'),
+        'gravity-grenade':('gravityGrenadeCount',GRAVITY_GRENADE_MAX,GRAVITY_GRENADE_COST,'Gravity grenade'),
+        'airstrike-phone':('airstrikeCount',AIRSTRIKE_MAX,AIRSTRIKE_COST,'Airstrike phone'),
+    }
+    if item_id not in catalog:
+        await send(player['ws'], {'type':'purchase-result','ok':False,'message':'That shop item is unavailable.'})
+        return
+    field,maximum,cost,label=catalog[item_id]
+    count=int(player.get(field) or 0)
+    if count>=maximum:
+        await send(player['ws'],{'type':'purchase-result','ok':False,'message':f'You can carry at most {maximum} {label.lower()} item(s).','grenadeCount':int(player.get('grenadeCount') or 0),'gravityGrenadeCount':int(player.get('gravityGrenadeCount') or 0),'airstrikeCount':int(player.get('airstrikeCount') or 0)})
+        return
+    if int(player.get('coins') or 0)<cost:
+        await send(player['ws'],{'type':'purchase-result','ok':False,'message':f'You need {cost} coins.','grenadeCount':int(player.get('grenadeCount') or 0),'gravityGrenadeCount':int(player.get('gravityGrenadeCount') or 0),'airstrikeCount':int(player.get('airstrikeCount') or 0)})
+        return
+    player['coins']-=cost
+    player[field]=count+1
+    save_character(player)
+    await send_progress(player,f'Bought {label.lower()}')
+    await send(player['ws'],{'type':'purchase-result','ok':True,'message':f'{label} added.','grenadeCount':int(player.get('grenadeCount') or 0),'gravityGrenadeCount':int(player.get('gravityGrenadeCount') or 0),'airstrikeCount':int(player.get('airstrikeCount') or 0)})
 
 async def craft_item(room, player, raw_item):
     item = sanitize_item(raw_item)
@@ -1976,6 +2828,24 @@ async def admin_action(room, admin, message):
 
 
 def simulate(room, dt, now):
+    gravity_now = low_gravity_active(room, now)
+    gravity_was = bool(room.get('lowGravityWasActive'))
+    if gravity_was and not gravity_now:
+        room['lowGravityWasActive'] = False
+        asyncio.create_task(broadcast(room, {'type':'chaos-state','chaos':public_chaos_state(room)}, space='world'))
+        asyncio.create_task(broadcast(room, {'type':'physics-event','event':{'kind':'low-gravity-end'}}, space='world'))
+    elif gravity_now:
+        room['lowGravityWasActive'] = True
+    if now >= float(room.get('nextLowGravityAt') or 0) and not gravity_now:
+        room['lowGravityWarningAt']=now+5.0
+        room['nextLowGravityAt']=now+5.0+LOW_GRAVITY_DURATION+random.uniform(LOW_GRAVITY_INTERVAL_MIN,LOW_GRAVITY_INTERVAL_MAX)
+        asyncio.create_task(broadcast(room,{'type':'physics-event','event':{'kind':'low-gravity-warning','startsInMs':5000}},space='world'))
+    if room.get('lowGravityWarningAt') and now >= float(room.get('lowGravityWarningAt') or 0):
+        room['lowGravityWarningAt']=0.0
+        room['lowGravityUntil']=now+LOW_GRAVITY_DURATION
+        room['lowGravityWasActive']=True
+        asyncio.create_task(broadcast(room,{'type':'chaos-state','chaos':public_chaos_state(room)},space='world'))
+        asyncio.create_task(broadcast(room,{'type':'physics-event','event':{'kind':'low-gravity-start','durationMs':int(LOW_GRAVITY_DURATION*1000)}},space='world'))
     for player in connected(room):
         if now >= player.get('nextPassiveCoinAt', now + PASSIVE_COIN_INTERVAL):
             player['nextPassiveCoinAt'] = now + PASSIVE_COIN_INTERVAL
@@ -1985,6 +2855,29 @@ def simulate(room, dt, now):
             asyncio.create_task(grant(player, xp=3, coins=PASSIVE_COIN_REWARD, reason='Time played'))
         if player['knockedOut'] and now >= player['respawnAt']:
             respawn(player)
+        if player.get('carriedBy'):
+            carrier=room.get('players',{}).get(player.get('carriedBy'))
+            if not carrier or not carrier.get('connected') or carrier.get('knockedOut') or carrier.get('space','world')!=player.get('space','world'):
+                if carrier and carrier.get('carriedTargetId')==player['id']: carrier['carriedTargetId']=None
+                player['carriedBy']=None
+            else:
+                angle=float(carrier.get('direction') or 0)
+                player['x']=carrier['x']-math.cos(angle)*42
+                player['y']=carrier['y']-math.sin(angle)*42
+                player['vx']=carrier.get('vx',0); player['vy']=carrier.get('vy',0)
+                player['moveVx']=player['moveVy']=0; player['moving']=carrier.get('moving',False)
+                player['downedUntil']=max(float(player.get('downedUntil') or 0),now+.25)
+                continue
+        if player.get('ridingCartId'):
+            cart=room.get('physicsObjects',{}).get(player.get('ridingCartId'))
+            if not cart or cart.get('riderId')!=player['id']:
+                player['ridingCartId']=None
+            else:
+                player['input']=sanitize_input({}); player['moveVx']=player['moveVy']=0
+                continue
+        if not player.get('knockedOut') and player.get('downedUntil') and now >= float(player.get('downedUntil') or 0):
+            player['downedUntil'] = 0.0
+            player['downedImmunityUntil'] = now + 0.55
         if player.get('frozen') or now - float(player.get('lastInputAt') or now) > .75:
             player['input'] = sanitize_input({})
 
@@ -1999,8 +2892,9 @@ def simulate(room, dt, now):
         in_parry_recovery = now < float(player.get('parryRecoveryUntil') or 0)
         combo_locked = bool(player.get('comboOwner')) and stunned
         combo_attacking = bool(player.get('comboTarget'))
-        can_act = not player['knockedOut'] and not stunned and not in_parry_recovery
-        if player.get('emote') and (now >= float(player.get('emoteUntil') or 0) or length > .08 or player['knockedOut'] or stunned or combo_locked or combo_attacking or player.get('dashActive') or player.get('parrying')):
+        downed = now < float(player.get('downedUntil') or 0)
+        can_act = not player['knockedOut'] and not downed and not stunned and not in_parry_recovery
+        if player.get('emote') and (now >= float(player.get('emoteUntil') or 0) or length > .08 or player['knockedOut'] or downed or stunned or combo_locked or combo_attacking or player.get('dashActive') or player.get('parrying')):
             cancel_emote(player)
 
         if player.get('dashActive'):
@@ -2032,7 +2926,9 @@ def simulate(room, dt, now):
                     asyncio.create_task(start_attack(room, player, True))
             continue
 
-        player['sprinting'] = can_act and not combo_attacking and control['sprint'] and length > .08 and player['stamina'] > 1 and not player['parrying']
+        held_object = room.get('physicsObjects', {}).get(player.get('heldObjectId')) if player.get('heldObjectId') else None
+        burdened = bool(player.get('carriedTargetId')) or (held_object and held_object.get('type') == 'cart')
+        player['sprinting'] = can_act and not combo_attacking and not burdened and control['sprint'] and length > .08 and player['stamina'] > 1 and not player['parrying']
         if player['sprinting']:
             player['stamina'] = max(0, player['stamina'] - SPRINT_DRAIN * dt)
             player['lastStaminaUseAt'] = now
@@ -2040,6 +2936,10 @@ def simulate(room, dt, now):
             player['stamina'] = min(STAMINA_MAX, player['stamina'] + STAMINA_REGEN * dt)
 
         speed = SPEED * player.get('speedMult', 1)
+        if player.get('carriedTargetId'):
+            speed *= .72
+        elif held_object and held_object.get('type') == 'cart':
+            speed *= .80
         if player['sprinting']:
             speed *= SPRINT * player.get('sprintMult', 1)
         if not can_act or player['parrying'] or combo_attacking:
@@ -2054,7 +2954,7 @@ def simulate(room, dt, now):
             player['direction'] = math.atan2(player['moveVy'], player['moveVx'])
             player['facing'] = 1 if math.cos(player['direction']) >= 0 else -1
 
-        decay = math.exp(-8.5 * dt)
+        decay = math.exp((-4.7 if low_gravity_active(room, now) else -8.5) * dt)
         player['impulseX'] *= decay
         player['impulseY'] *= decay
         player['vx'] = player['moveVx'] + player['impulseX']
@@ -2062,10 +2962,14 @@ def simulate(room, dt, now):
         bound_w, bound_h = (ROOM_W, ROOM_H) if player.get('space','world').startswith('room:') else (WORLD_W, WORLD_H)
         move_with_collisions(player, player['vx'] * dt, player['vy'] * dt, bound_w, bound_h)
 
+    simulate_physics(room, dt, now)
+
     players = connected(room)
     for i, a in enumerate(players):
         for b in players[i+1:]:
             if a.get('space','world') != b.get('space','world'):
+                continue
+            if a.get('ridingCartId') or b.get('ridingCartId') or a.get('carriedBy') or b.get('carriedBy'):
                 continue
             if a.get('comboTarget') == b['id'] or b.get('comboTarget') == a['id']:
                 continue
@@ -2196,8 +3100,22 @@ async def ws_handler(request):
             elif message_type == 'dash':
                 cancel_emote(player)
                 await dash(room, player, message.get('x'), message.get('y'))
-            elif message_type == 'interact':
-                pass
+            elif message_type == 'interact' or message_type == 'physics-interact':
+                await physics_interact(room, player)
+            elif message_type == 'object-charge-start':
+                await start_throw_charge(room, player)
+            elif message_type == 'object-throw':
+                await throw_held_object(room, player)
+            elif message_type == 'object-kick':
+                await kick_object(room, player)
+            elif message_type == 'physics-carry':
+                await physics_carry(room, player)
+            elif message_type == 'use-grenade':
+                await use_knockback_grenade(room, player)
+            elif message_type == 'use-gravity-grenade':
+                await use_gravity_grenade(room, player)
+            elif message_type == 'target-airstrike':
+                await target_airstrike(room, player, message.get('x'), message.get('y'))
             elif message_type == 'emote':
                 emote = clean_emote(message.get('emote'))
                 now = time.monotonic()
@@ -2298,6 +3216,7 @@ async def ws_handler(request):
                 player['input'] = sanitize_input({})
                 player['moving'] = player['blocking'] = player['sprinting'] = player['parrying'] = False
                 release(room, player)
+                release_held_object(room, player, place=True)
                 save_character(player)
                 await snapshot(room)
                 player['remove_task'] = asyncio.create_task(remove_later(room, player))
@@ -2335,11 +3254,11 @@ async def game_loop(app):
 async def health(request):
     response = web.json_response({
         'ok': True,
-        'service': 'green-floor-v34-pro',
+        'service': 'green-floor-v36-pro',
         'rooms': len(rooms),
         'players': sum(len(connected(room)) for room in rooms.values()),
         'build': BUILD,
-        'voice': '32khz-ima-adpcm-pro-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'readable-committed-attacks-easier-neutral-parry-v34',
+        'voice': '32khz-ima-adpcm-pro-relay+positional-boombox', 'singleWorld': True, 'automaticConnection': True, 'roomCodes': False, 'persistence': 'sqlite', 'gameplay': 'controlled-chaos-airstrike-gravity-cart-v36',
     })
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
