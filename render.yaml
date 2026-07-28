@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: green-floor-server
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python server.py
+    name: infinite-room-horror-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
     healthCheckPath: /health
-    plan: pro
+    autoDeploy: true
